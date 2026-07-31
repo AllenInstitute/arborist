@@ -1,0 +1,92 @@
+name: Tag and publish
+on:
+  push:
+    branches:
+      - main
+# Remove line 67 to enable automated semantic version bumps.
+# Requires that svc-aindscicomp be added to the repo with "write" role.
+
+# Change line 73 from "if: false" to "if: true" to enable PyPI publishing.
+# Requires that the repo has been added as a Trusted Publisher in the PyPI.
+# Please submit a request to Scientific Computing to add the Trusted Publisher.
+jobs:
+  update_badges:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        ref: ${{ env.DEFAULT_BRANCH }}
+        fetch-depth: 0
+        token: ${{ secrets.SERVICE_TOKEN }}
+    - name: Set up Python 3.10
+      uses: astral-sh/setup-uv@v7
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: uv sync
+    - name: Get Python version and Update README.md
+      run: |
+        python_version=$(grep "requires-python" pyproject.toml | grep -o ">=[^\"]*")
+        python_badge=$(grep '^\!\[Python\]' README.md | sed -n 's/.*\(python-[^)]*\).*/\1/p')
+        new_python_badge="python-$python_version-blue?logo=python"
+        sed -i "s/$python_badge/$new_python_badge/g" README.md
+    - name: Get interrogate values and Update README.md
+      run: |
+        interrogate_val=$(uv run interrogate . | grep -o 'actual: [0-9]*\.[0-9]*' | awk '{print $2}')
+        interrogate_badge=$(grep '^\!\[Interrogate\]' README.md | sed -n 's/.*\(interrogate-[^)]*\).*/\1/p')
+        if (( $(echo "$interrogate_val >= 90.00" | bc -l) )); then
+            new_interrogate_badge="interrogate-$interrogate_val%25-brightgreen"
+        elif (( $(echo "$interrogate_val < 80.00" | bc -l) )); then
+            new_interrogate_badge="interrogate-$interrogate_val%25-red"
+        else
+            new_interrogate_badge="interrogate-$interrogate_val%25-yellow"
+        fi
+        sed -i "s/$interrogate_badge/$new_interrogate_badge/g" README.md
+    - name: Get Coverage values and Update README.md
+      run: |
+        uv run coverage run -m unittest discover
+        coverage_val=$(uv run coverage report | grep "^TOTAL" | grep -o '[0-9]\+%' | grep -o '[0-9]\+')
+        coverage_badge=$(grep '^\!\[Coverage\]' README.md | sed -n 's/.*\(coverage-[^)]*\).*/\1/p')
+        if (( $(echo "$coverage_val >= 90.00" | bc -l) )); then 
+            new_coverage_badge="coverage-$coverage_val%25-brightgreen"
+        elif (( $(echo "$coverage_val < 80.00" | bc -l) )); then
+            new_coverage_badge="coverage-$coverage_val%25-red"
+        else
+            new_coverage_badge="coverage-$coverage_val%25-yellow"
+        fi
+        sed -i "s/$coverage_badge/$new_coverage_badge/g" README.md
+    - name: Commit changes
+      uses: EndBug/add-and-commit@v9
+      with:
+        default_author: github_actions
+        message: "ci: update badges [skip actions]"
+        add: '["README.md"]'
+  tag:
+    needs: update_badges
+    if: ${{github.event.repository.name == 'aind-library-template'}}
+    uses: AllenNeuralDynamics/.github/.github/workflows/release-bump-version-uv.yml@main
+    secrets:
+      repo-token: ${{ secrets.SERVICE_TOKEN }}
+  publish:
+    needs: tag
+    if: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # IMPORTANT: this permission is mandatory for Trusted Publishing
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+      - name: Pull latest changes
+        run: git pull origin main
+      - name: Set up Python 3.10
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: '3.10'
+      - name: Build and validate package
+        run: |
+          uv build
+          uvx twine check dist/*
+      - name: Publish on PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
