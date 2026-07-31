@@ -21,7 +21,7 @@ current_year = date.today().year
 project = Path(dirname(dirname(dirname(abspath(__file__))))).name
 copyright = f"{current_year}, {INSTITUTE_NAME}"
 author = INSTITUTE_NAME
-release = get_version("aind-library-template")
+release = get_version("arborist")
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration

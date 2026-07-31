@@ -1,7 +1,7 @@
 # DEPRECATION NOTICE!
-We are deprecating aind-library-template repository.  Please use the new [python library template](https://github.com/AllenNeuralDynamics/python-templates) that conforms to the latest coding standards.
+We are deprecating arborist repository.  Please use the new [python library template](https://github.com/AllenNeuralDynamics/python-templates) that conforms to the latest coding standards.
 
-# aind-library-template
+# arborist
 
 [![License](https://img.shields.io/badge/license-MIT-brightgreen)](LICENSE)
 ![Code Style](https://img.shields.io/badge/code%20style-black-black)

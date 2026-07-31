@@ -3,8 +3,8 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "aind-library-template"
-description = "Prints messages to stdout. Simple boilerplate for libraries."
+name = "arborist"
+description = "Generated from aind-library-template"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
@@ -14,10 +14,9 @@ classifiers = [
     "Programming Language :: Python :: 3"
 ]
 readme = "README.md"
-version = "0.4.18"
+version = "0.0.0"
 
 dependencies = [
-    'pandas'
 ]
 
 [dependency-groups]
@@ -58,7 +57,7 @@ exclude = '''
 
 [tool.coverage.run]
 omit = ["*__init__*"]
-source = ["aind_library_template", "tests"]
+source = ["arborist", "tests"]
 
 [tool.coverage.report]
 exclude_lines = [
