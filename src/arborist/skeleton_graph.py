@@ -671,7 +671,7 @@ class SkeletonGraph(nx.Graph):
         -------
         SkeletonGraph
         """
-        subgraph = SkeletonGraph(anisotropy=self.anisotropy)
+        subgraph = self.__class__(anisotropy=self.anisotropy)
         subgraph.add_node(0)
         idxs = [root]
         node_mapping = {root: 0}
