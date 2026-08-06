@@ -172,6 +172,23 @@ def curve_principal_direction(curve):
     return direction / np.linalg.norm(direction)
 
 
+def path_length(curve):
+    """
+    Computes the total arc length of a 3D curve.
+
+    Parameters
+    ----------
+    curve : numpy.ndarray
+        Array of shape (N, 3).
+
+    Returns
+    -------
+    float
+        Total arc length in the same units as the input coordinates.
+    """
+    return np.linalg.norm(curve[1:] - curve[:-1], axis=1).sum()
+
+
 def max_l2_error(curve1, curve2):
     """
     Computes maximum pointwise L2 error between two curves.
