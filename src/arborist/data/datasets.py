@@ -242,7 +242,11 @@ def build_dataloader(
     -------
     DataLoader
     """
-    sampler = CurveSampler(dataset, examples_per_epoch) if use_sampler else None
+    if use_sampler:
+        sampler = CurveSampler(dataset, examples_per_epoch)
+    else:
+        sampler = None
+
     return DataLoader(
         dataset,
         batch_size=batch_size,
