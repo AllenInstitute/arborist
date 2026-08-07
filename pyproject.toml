@@ -17,6 +17,8 @@ readme = "README.md"
 version = "0.0.0"
 
 dependencies = [
+    "boto3",
+    "google-cloud-storage",
     "matplotlib",
     "networkx",
     "numpy",
