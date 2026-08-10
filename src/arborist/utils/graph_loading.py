@@ -30,18 +30,16 @@ class GraphLoader:
         self,
         anisotropy=(1.0, 1.0, 1.0),
         min_cable_length=40.0,
-        min_swc_pts=1,
         node_spacing=1,
         prefetch=128,
         prune_depth=24.0,
         verbose=False,
     ):
         self.min_cable_length = min_cable_length
-        self.min_swc_pts = min_swc_pts
         self.node_spacing = node_spacing
         self.prefetch = prefetch
         self.prune_depth = prune_depth
-        self.swc_reader = swc_util.Reader(anisotropy, min_swc_pts, verbose)
+        self.swc_reader = swc_util.Reader(anisotropy, verbose)
         self.verbose = verbose
 
     def __call__(self, swc_pointer):
@@ -61,9 +59,7 @@ class GraphLoader:
             ``"is_soma"``.
         """
         swc_dicts = self.swc_reader(swc_pointer)
-        swc_dicts = deque(
-            d for d in swc_dicts if len(d["xyz"]) > self.min_swc_pts
-        )
+        swc_dicts = deque(swc_dicts)
         if self.verbose:
             pbar = tqdm(total=len(swc_dicts), desc="Load Graphs")
 
