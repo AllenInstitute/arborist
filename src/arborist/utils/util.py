@@ -16,6 +16,7 @@ from botocore.config import Config as _BotocoreConfig
 from google.cloud import storage as gcs_storage
 
 import boto3
+import json
 import os
 
 
@@ -34,6 +35,21 @@ def read_txt(path, client=None):
 def read_zip_entry(zip_file, path):
     with zip_file.open(path) as f:
         return f.read().decode("utf-8")
+
+
+def write_json(path, contents):
+    """
+    Writes contents to a JSON file.
+
+    Parameters
+    ----------
+    path : str
+        Destination file path.
+    contents : dict
+        Data to serialize.
+    """
+    with open(path, "w") as f:
+        json.dump(contents, f, indent=4)
 
 
 # --- Path Utils ---
