@@ -18,6 +18,7 @@ import pandas as pd
 import torch
 
 from arborist.utils.graph_utils import topological_decomposition
+from arborist.utils.util import write_json
 
 
 # --- Dataset Classes ---
@@ -121,6 +122,11 @@ class GraphDataset(Dataset):
         self.root_nodes = root_nodes
         self.max_depth = max_depth
         self.transform = transform
+        self.config = {
+            "max_depth": max_depth,
+            "transform": type(transform).__name__ if transform else None,
+        }
+
 
     def __getitem__(self, i):
         # Extract tree sample components
@@ -144,6 +150,17 @@ class GraphDataset(Dataset):
 
     def __len__(self):
         return len(self.root_nodes)
+
+    def save_config(self, path):
+        """
+        Saves dataset parameters to a JSON file.
+
+        Parameters
+        ----------
+        path : str
+            Destination file path.
+        """
+        write_json(path, self.config)
 
 
 class TreeSample:
@@ -244,6 +261,8 @@ class DatasetCollection(Dataset):
     ):
         self.datasets = datasets
         self.is_val = is_val
+        self.n_val_examples = n_val_examples
+        self.seed = seed
         self._build_index(weight_fn)
         if is_val:
             self.val_examples = self._precompute_val(n_val_examples, seed)
@@ -281,6 +300,28 @@ class DatasetCollection(Dataset):
         if self.is_val:
             return len(self.val_examples)
         return len(self.index)
+
+    def save_config(self, path):
+        """
+        Saves collection and dataset parameters to a single JSON file.
+
+        Dataset parameters are taken from the first constituent dataset
+        (all datasets in a collection share the same configuration).
+
+        Parameters
+        ----------
+        path : str
+            Destination file path.
+        """
+        config = {
+            "n_datasets": len(self.datasets),
+            "is_val": self.is_val,
+            "n_val_examples": self.n_val_examples,
+            "seed": self.seed,
+        }
+        if self.datasets and hasattr(self.datasets[0], "config"):
+            config.update(self.datasets[0].config)
+        write_json(path, config)
 
     def __repr__(self):
         return (
