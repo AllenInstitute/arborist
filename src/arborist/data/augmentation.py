@@ -12,6 +12,40 @@ import numpy as np
 import random
 
 
+class GraphTransforms:
+    """
+    Applies a sequence of transforms to all node coordinates of a subgraph.
+
+    Unlike CurveTransforms (which acts on one curve at a time), this class
+    operates on the full (N_nodes, 3) node_xyz array of a rooted subgraph so
+    that every curve in the graph receives the same rotation and mirror flip,
+    preserving inter-curve spatial relationships.
+    """
+
+    def __init__(self):
+        self.transforms = [
+            RandomRotation3D(),
+            RandomMirror3D(),
+            RandomJitter3D(),
+        ]
+
+    def __call__(self, xyz):
+        """
+        Parameters
+        ----------
+        xyz : numpy.ndarray
+            Shape (N, 3) — coordinates of all nodes in the subgraph.
+
+        Returns
+        -------
+        numpy.ndarray
+            Augmented coordinates, same shape.
+        """
+        for transform in self.transforms:
+            xyz = transform(xyz)
+        return xyz
+
+
 class CurveTransforms:
     """
     Class that applies a sequence of transforms to a 3D space curve.

@@ -98,7 +98,7 @@ class GraphDataset(Dataset):
     connectivity between them.
     """
 
-    def __init__(self, graph, root_nodes, max_depth=None, transform=None):
+    def __init__(self, graph, root_nodes, max_depth=None, transform=None, graph_transform=None):
         """
         Instantiates a GraphDataset object.
 
@@ -113,6 +113,12 @@ class GraphDataset(Dataset):
         transform : callable, optional
             Applied to each raw xyz array before differencing (e.g.
             CurveTransforms for augmentation). Default is None.
+        graph_transform : callable, optional
+            Applied to the full (N_nodes, 3) node_xyz array of the rooted
+            subgraph before path decomposition (e.g. GraphTransforms). Because
+            it acts on all node coordinates at once, every curve in the
+            subgraph receives the same rotation and mirror flip, preserving
+            inter-curve spatial relationships. Default is None.
         """
         # Call parent class
         super().__init__()
@@ -122,9 +128,11 @@ class GraphDataset(Dataset):
         self.root_nodes = root_nodes
         self.max_depth = max_depth
         self.transform = transform
+        self.graph_transform = graph_transform
         self.config = {
             "max_depth": max_depth,
             "transform": type(transform).__name__ if transform else None,
+            "graph_transform": type(graph_transform).__name__ if graph_transform else None,
         }
 
 
@@ -132,6 +140,8 @@ class GraphDataset(Dataset):
         # Extract tree sample components
         root = self.root_nodes[i]
         subgraph = self.graph.rooted_subgraph(root, self.max_depth)
+        if self.graph_transform:
+            subgraph.node_xyz = self.graph_transform(subgraph.node_xyz)
         _, paths, topo_edge_index = topological_decomposition(subgraph)
 
         # Create list of curves

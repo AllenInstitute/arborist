@@ -104,8 +104,7 @@ class GraphTransformer(nn.Module):
         True at (i, j) blocks attention from node i to node j.
         Every node attends to itself and all immediate neighbors.
         """
-        mask = torch.ones(n, n, dtype=torch.bool, device=device)
-        mask.fill_diagonal_(False)
+        mask = ~torch.eye(n, dtype=torch.bool, device=device)
         if edge_index.shape[1] > 0:
             mask[edge_index[0], edge_index[1]] = False
         return mask
