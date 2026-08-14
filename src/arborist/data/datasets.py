@@ -190,9 +190,10 @@ class TreeSample:
         branches.
     """
 
-    def __init__(self, curves, edge_index):
+    def __init__(self, curves, edge_index, root_curve_indices=None):
         self.curves = curves
         self.edge_index = edge_index
+        self.root_curve_indices = root_curve_indices
 
     def __repr__(self):
         return (
