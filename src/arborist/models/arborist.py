@@ -102,7 +102,7 @@ class Arborist(nn.Module):
         diffs = torch.zeros(B, n_max, 3, device=device)
         mask = torch.ones(B, n_max, dtype=torch.bool, device=device)
         for i, (c, l) in enumerate(zip(curves, lengths)):
-            diffs[i, :l] = torch.tensor(c, dtype=torch.float32, device=device)
+            diffs[i, :l] = torch.as_tensor(c, dtype=torch.float32, device=device)
             mask[i, :l] = False
         return diffs, mask
 
@@ -135,7 +135,7 @@ class Arborist(nn.Module):
         z, _ = self.curve_encoder(diffs, mask)              # (n_curves, latent_dim)
 
         # Contextualize via graph topology
-        edge_index = torch.tensor(
+        edge_index = torch.as_tensor(
             sample.edge_index, dtype=torch.long, device=device
         )
         z_curves = self.graph_transformer(z, edge_index)    # (n_curves, latent_dim)
