@@ -97,7 +97,7 @@ class Arborist(nn.Module):
     def _collate_curves(self, curves):
         device = next(self.parameters()).device
         lengths = [len(c) for c in curves]
-        n_max = max(lengths)
+        n_max = max(max(lengths), self.curve_encoder.segment_len)
         B = len(curves)
         diffs = torch.zeros(B, n_max, 3, device=device)
         mask = torch.ones(B, n_max, dtype=torch.bool, device=device)
