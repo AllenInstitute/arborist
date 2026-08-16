@@ -106,6 +106,7 @@ class Arborist(nn.Module):
             mask[i, :l] = False
         return diffs, mask
 
+    @torch._dynamo.disable
     def encode(self, sample):
         """
         Encodes a TreeSample into per-curve and global tree embeddings.
