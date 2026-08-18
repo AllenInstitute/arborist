@@ -146,13 +146,14 @@ class Arborist(nn.Module):
     def forward(self, sample):
         return self.encode(sample)
 
-    def save_config(self, path):
-        with open(path, "w") as f:
-            json.dump(self.config, f)
+    def save(self, path):
+        torch.save(
+            {"config": self.config, "state_dict": self.state_dict()}, path
+        )
 
     @classmethod
     def load(cls, path):
         checkpoint = torch.load(path)
         model = cls(**checkpoint["config"])
-        model.load_state_dict(checkpoint["model_state_dict"])
+        model.load_state_dict(checkpoint["state_dict"])
         return model
