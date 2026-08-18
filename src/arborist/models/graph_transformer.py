@@ -12,62 +12,6 @@ import torch
 import torch.nn as nn
 
 
-class GraphTransformerLayer(nn.Module):
-    """
-    One layer of graph-masked multi-head self-attention with pre-norm and FFN.
-
-    Each node attends only to itself and its immediate graph neighbors.
-    """
-
-    def __init__(self, d_model, n_heads, d_ff, dropout=0.1):
-        """
-        Parameters
-        ----------
-        d_model : int
-            Node feature dimension.
-        n_heads : int
-            Number of attention heads.
-        d_ff : int
-            Feed-forward hidden dimension.
-        dropout : float, optional
-            Dropout probability. Default is 0.1.
-        """
-        super().__init__()
-        self.attn = nn.MultiheadAttention(
-            d_model, n_heads, dropout=dropout, batch_first=True
-        )
-        self.ff = nn.Sequential(
-            nn.Linear(d_model, d_ff),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_ff, d_model),
-        )
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x, attn_mask=None):
-        """
-        Parameters
-        ----------
-        x : torch.Tensor
-            Shape (n, d_model) — one feature vector per graph node.
-        attn_mask : torch.Tensor, optional
-            Shape (n, n) BoolTensor; True at (i, j) blocks attention from
-            node i to node j. Default is None (full attention).
-
-        Returns
-        -------
-        torch.Tensor
-            Shape (n, d_model).
-        """
-        h = self.norm1(x).unsqueeze(0)                # (1, n, d_model)
-        h, _ = self.attn(h, h, h, attn_mask=attn_mask)
-        x = x + self.dropout(h.squeeze(0))            # (n, d_model)
-        x = x + self.dropout(self.ff(self.norm2(x)))
-        return x
-
-
 class GraphTransformer(nn.Module):
     """
     Stack of graph-masked transformer layers over a set of node features.
@@ -76,11 +20,11 @@ class GraphTransformer(nn.Module):
     coupling transformer expressiveness with explicit graph topology.
     """
 
-    def __init__(self, d_model, n_heads=4, n_layers=3, d_ff=256, dropout=0.1):
+    def __init__(self, latent_dim, n_heads=4, n_layers=3, d_ff=128, dropout=0.1):
         """
         Parameters
         ----------
-        d_model : int
+        latent_dim : int
             Node feature dimension (must equal CurveEncoder latent_dim when
             used inside ArboristModel).
         n_heads : int, optional
@@ -88,16 +32,16 @@ class GraphTransformer(nn.Module):
         n_layers : int, optional
             Number of transformer layers. Default is 3.
         d_ff : int, optional
-            Feed-forward hidden dimension. Default is 256.
+            Feed-forward hidden dimension. Default is 128.
         dropout : float, optional
             Dropout probability. Default is 0.1.
         """
         super().__init__()
         self.layers = nn.ModuleList([
-            GraphTransformerLayer(d_model, n_heads, d_ff, dropout)
+            GraphTransformerLayer(latent_dim, n_heads, d_ff, dropout)
             for _ in range(n_layers)
         ])
-        self.norm = nn.LayerNorm(d_model)
+        self.norm = nn.LayerNorm(latent_dim)
 
     def _build_attn_mask(self, n, edge_index, device):
         """
@@ -114,7 +58,7 @@ class GraphTransformer(nn.Module):
         Parameters
         ----------
         x : torch.Tensor
-            Shape (n, d_model) — one feature vector per graph node (curve).
+            Shape (n, latent_dim) — one feature vector per graph node (curve).
         edge_index : torch.Tensor
             Shape (2, E), dtype long — bidirectional line-graph adjacency
             as returned by GraphDataset.
@@ -122,9 +66,63 @@ class GraphTransformer(nn.Module):
         Returns
         -------
         torch.Tensor
-            Shape (n, d_model) — enriched node features.
+            Shape (n, latent_dim) — enriched node features.
         """
         attn_mask = self._build_attn_mask(x.shape[0], edge_index, x.device)
         for layer in self.layers:
             x = layer(x, attn_mask)
         return self.norm(x)
+
+
+class GraphTransformerLayer(nn.Module):
+    """
+    One layer of graph-masked multi-head self-attention with pre-norm and FFN.
+    """
+
+    def __init__(self, latent_dim, n_heads, d_ff, dropout=0.1):
+        """
+        Parameters
+        ----------
+        latent_dim : int
+            Node feature dimension.
+        n_heads : int
+            Number of attention heads.
+        d_ff : int
+            Feed-forward hidden dimension.
+        dropout : float, optional
+            Dropout probability. Default is 0.1.
+        """
+        super().__init__()
+        self.attn = nn.MultiheadAttention(
+            latent_dim, n_heads, dropout=dropout, batch_first=True
+        )
+        self.ff = nn.Sequential(
+            nn.Linear(latent_dim, d_ff),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_ff, latent_dim),
+        )
+        self.norm1 = nn.LayerNorm(latent_dim)
+        self.norm2 = nn.LayerNorm(latent_dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, attn_mask=None):
+        """
+        Parameters
+        ----------
+        x : torch.Tensor
+            Shape (n, latent_dim) — one feature vector per graph node.
+        attn_mask : torch.Tensor, optional
+            Shape (n, n) BoolTensor; True at (i, j) blocks attention from
+            node i to node j. Default is None (full attention).
+
+        Returns
+        -------
+        torch.Tensor
+            Shape (n, latent_dim).
+        """
+        h = self.norm1(x).unsqueeze(0)                # (1, n, latent_dim)
+        h, _ = self.attn(h, h, h, attn_mask=attn_mask)
+        x = x + self.dropout(h.squeeze(0))            # (n, latent_dim)
+        x = x + self.dropout(self.ff(self.norm2(x)))
+        return x

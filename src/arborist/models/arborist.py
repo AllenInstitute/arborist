@@ -24,73 +24,73 @@ class Arborist(nn.Module):
       1. CurveEncoder   — each irreducible path → latent vector z_i
       2. GraphTransformer — message-pass over the line graph of the skeleton
                            so each curve sees its neighboring branches
-      3. Mean-pool      — average over all curve embeddings → global tree z
+      3. Readout      — average over all curve embeddings → global tree z
 
     Parameters
     ----------
-    segment_len : int, optional
+    curve_segment_len : int, optional
         Points per curve segment for CurveEncoder. Default is 10.
-    d_token : int, optional
+    curve_d_token : int, optional
         CurveEncoder token dimension. Default is 128.
     curve_n_heads : int, optional
         Attention heads in CurveEncoder. Default is 4.
     curve_n_layers : int, optional
         Transformer layers in CurveEncoder. Default is 4.
-    d_ff_curve : int, optional
-        CurveEncoder feed-forward dimension. Default is 256.
-    latent_dim : int, optional
-        Shared latent dimension: CurveEncoder output = GraphTransformer input.
-        Default is 64.
+    curve_d_ff : int, optional
+        CurveEncoder feed-forward dimension. Default is 128.
     graph_n_heads : int, optional
         Attention heads in GraphTransformer. Default is 4.
     graph_n_layers : int, optional
         Transformer layers in GraphTransformer. Default is 3.
-    d_ff_graph : int, optional
-        GraphTransformer feed-forward dimension. Default is 256.
+    graph_d_ff : int, optional
+        GraphTransformer feed-forward dimension. Default is 128.
+    latent_dim : int, optional
+        Shared latent dimension: CurveEncoder output = GraphTransformer input.
+        Default is 64.
     dropout : float, optional
         Dropout probability shared across both sub-models. Default is 0.1.
     """
 
     def __init__(
         self,
-        segment_len=10,
-        d_token=128,
+        curve_segment_len=10,
+        curve_d_token=64,
         curve_n_heads=4,
         curve_n_layers=4,
-        d_ff_curve=256,
-        latent_dim=64,
+        curve_d_ff=128,
         graph_n_heads=4,
         graph_n_layers=3,
-        d_ff_graph=256,
+        graph_d_ff=128,
+        latent_dim=64,
         dropout=0.1,
     ):
         super().__init__()
         self.config = {
-            "segment_len": segment_len,
-            "d_token": d_token,
+            "curve_segment_len": curve_segment_len,
+            "curve_d_token": curve_d_token,
             "curve_n_heads": curve_n_heads,
             "curve_n_layers": curve_n_layers,
-            "d_ff_curve": d_ff_curve,
-            "latent_dim": latent_dim,
+            "curve_d_ff": curve_d_ff,
             "graph_n_heads": graph_n_heads,
             "graph_n_layers": graph_n_layers,
-            "d_ff_graph": d_ff_graph,
+            "graph_d_ff": graph_d_ff,
+            "latent_dim": latent_dim,
             "dropout": dropout,
         }
         self.curve_encoder = CurveEncoder(
-            segment_len=segment_len,
-            d_token=d_token,
+            segment_len=curve_segment_len,
+            d_token=curve_d_token,
             n_heads=curve_n_heads,
             n_layers=curve_n_layers,
-            d_ff=d_ff_curve,
+            d_ff=curve_d_ff,
             latent_dim=latent_dim,
             dropout=dropout,
         )
         self.graph_transformer = GraphTransformer(
-            d_model=latent_dim,
+            latent_dim=latent_dim,
             n_heads=graph_n_heads,
             n_layers=graph_n_layers,
-            d_ff=d_ff_graph,
+            d_ff=graph_d_ff,
             dropout=dropout,
         )
 
@@ -131,17 +131,16 @@ class Arborist(nn.Module):
             empty = torch.zeros(self.config["latent_dim"], device=device)
             return empty, empty.unsqueeze(0)
 
-        # Encode all curves in parallel (treat each as an independent batch item)
-        diffs, mask = self._collate_curves(sample.curves)   # (n_curves, N_max, 3)
-        z, _ = self.curve_encoder(diffs, mask)              # (n_curves, latent_dim)
+        # Encode curves
+        diffs, mask = self._collate_curves(sample.curves)
+        z, _ = self.curve_encoder(diffs, mask)
 
-        # Contextualize via graph topology
+        # Encode graph
         edge_index = torch.as_tensor(
             sample.edge_index, dtype=torch.long, device=device
         )
-        z_curves = self.graph_transformer(z, edge_index)    # (n_curves, latent_dim)
-
-        z_tree = z_curves.mean(dim=0)                       # (latent_dim,)
+        z_curves = self.graph_transformer(z, edge_index)
+        z_tree = z_curves.mean(dim=0)
         return z_tree, z_curves
 
     def forward(self, sample):
