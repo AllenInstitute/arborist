@@ -26,6 +26,7 @@ class GraphTransforms:
         self.transforms = [
             RandomRotation3D(),
             RandomMirror3D(),
+            RandomElasticDeformation3D(),
             RandomJitter3D(),
         ]
 
@@ -59,6 +60,7 @@ class CurveTransforms:
         self.transforms = [
             RandomRotation3D(),
             RandomMirror3D(),
+            RandomElasticDeformation3D(),
             RandomJitter3D(),
         ]
 
@@ -82,6 +84,42 @@ class CurveTransforms:
 
 
 # --- Noise Transforms ---
+class RandomElasticDeformation3D:
+    """
+    Applies smooth elastic deformation to a 3D curve by adding spatially
+    correlated displacements (Gaussian-smoothed random offsets along the
+    point dimension).
+    """
+
+    def __init__(self, alpha=1.0, sigma=5.0, p=0.5):
+        """
+        Parameters
+        ----------
+        alpha : float, optional
+            Displacement magnitude in coordinate units. Default is 1.0.
+        sigma : float, optional
+            Smoothing scale in number of points. Larger values produce
+            broader, more global bends. Default is 5.0.
+        p : float, optional
+            Probability of applying the transform. Default is 0.5.
+        """
+        self.alpha = alpha
+        self.p = p
+        radius = max(1, int(3.0 * sigma + 0.5))
+        x = np.arange(-radius, radius + 1)
+        kernel = np.exp(-0.5 * (x / sigma) ** 2)
+        self.kernel = kernel / kernel.sum()
+
+    def __call__(self, curve):
+        if random.random() > self.p:
+            return curve
+        displacement = np.random.randn(*curve.shape)
+        for i in range(3):
+            displacement[:, i] = np.convolve(displacement[:, i], self.kernel, mode="same")
+        displacement /= np.abs(displacement).max() + 1e-8
+        return curve + self.alpha * displacement
+
+
 class RandomJitter3D:
     """
     Randomly adds Gaussian noise to each point in a 3D curve.
@@ -94,7 +132,7 @@ class RandomJitter3D:
         Parameters
         ----------
         sigma : float, optional
-            Standard deviation of the Gaussian noise. Default is 0.01.
+            Standard deviation of the Gaussian noise. Default is 0.1.
         p : float, optional
             Probability of applying the transform. Default is 0.5.
         """
