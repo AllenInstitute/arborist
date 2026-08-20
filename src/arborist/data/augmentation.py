@@ -85,7 +85,7 @@ class RandomJitter3D:
     Randomly adds Gaussian noise to each point in a 3D curve.
     """
 
-    def __init__(self, sigma=0.1, p=0.5):
+    def __init__(self, sigma=0.5, p=0.5):
         """
         Initializes a RandomJitter3D transformer.
 
