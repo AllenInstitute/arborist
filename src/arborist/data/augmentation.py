@@ -57,6 +57,8 @@ class CurveTransforms:
         a 3D space curve.
         """
         self.transforms = [
+            RandomRotation3D(),
+            RandomMirror3D(),
             RandomJitter3D(),
         ]
 
