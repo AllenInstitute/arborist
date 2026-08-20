@@ -73,7 +73,7 @@ class CurveTransforms:
         """
         # Check whether to reverse path
         if random.random() > 0.5:
-            curve = np.flip(curve)
+            curve = np.flip(curve, axis=0)
 
         # Apply transforms
         for transform in self.transforms:
@@ -87,14 +87,14 @@ class RandomJitter3D:
     Randomly adds Gaussian noise to each point in a 3D curve.
     """
 
-    def __init__(self, sigma=0.1, p=0.5):
+    def __init__(self, sigma=0.5, p=0.5):
         """
         Initializes a RandomJitter3D transformer.
 
         Parameters
         ----------
         sigma : float, optional
-            Standard deviation of the Gaussian noise. Default is 0.01.
+            Standard deviation of the Gaussian noise. Default is 0.1.
         p : float, optional
             Probability of applying the transform. Default is 0.5.
         """

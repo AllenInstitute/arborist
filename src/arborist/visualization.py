@@ -61,9 +61,9 @@ def plot_length_distribution(dataset, output_path=None, title=None):
 
     Parameters
     ----------
-    dataset : CurveDatasetCollection
-        Dataset containing an "examples_df" attribute with a "length" column
-        specifying the curve lengths.
+    dataset : DatasetCollection
+        Dataset with a ``curve_lengths()`` method returning a 1-D array of
+        path lengths in microns.
     output_path : str, optional
         If provided, the figure is saved to this location. Otherwise, it is
         displayed. Default is None.
@@ -71,7 +71,7 @@ def plot_length_distribution(dataset, output_path=None, title=None):
         Title of the plot. Default is None.
     """
     # Compute path length stats
-    lengths = dataset.examples_df["length"].to_numpy()
+    lengths = dataset.curve_lengths()
     p50, p99 = np.percentile(lengths, [50, 99.9])
     lengths = lengths[lengths <= p99]
 
