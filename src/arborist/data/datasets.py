@@ -334,6 +334,9 @@ class DatasetCollection(Dataset):
             config.update(self.datasets[0].config)
         write_json(path, config)
 
+    def curve_lengths(self):
+        return np.concatenate([ds.curve_lengths() for ds in self.datasets])
+
     def __repr__(self):
         return (
             f"DatasetCollection("
