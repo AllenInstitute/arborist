@@ -24,11 +24,70 @@ import zipfile as zf
 from arborist.utils.graph_loading import GraphLoader, count_nodes
 
 
+def _node_attr_store(graph):
+    store = graph.__dict__.get("_node_attrs")
+    if store is None:
+        store = graph.__dict__["_node_attrs"] = dict()
+    return store
+
+
+def _node_attr_property(name):
+    def getter(self):
+        try:
+            return _node_attr_store(self)[name]
+        except KeyError:
+            raise AttributeError(
+                f"'{type(self).__name__}' object has no attribute"
+                f" 'node_{name}'"
+            ) from None
+
+    def setter(self, value):
+        _node_attr_store(self)[name] = value
+
+    return property(getter, setter)
+
+
+def register_node_attrs(cls):
+    """
+    Installs a "node_<name>" property for every entry in the class's
+    NODE_ATTR_SPEC. Applied to SkeletonGraph directly and to every subclass
+    via __init_subclass__, so a subclass declares new node attributes by
+    extending NODE_ATTR_SPEC rather than by allocating its own arrays.
+
+    Parameters
+    ----------
+    cls : type
+        Class to install node attribute properties on.
+
+    Returns
+    -------
+    type
+    """
+    for name in cls.NODE_ATTR_SPEC:
+        attr_name = f"node_{name}"
+        if attr_name not in cls.__dict__:
+            setattr(cls, attr_name, _node_attr_property(name))
+    return cls
+
+
+@register_node_attrs
 class SkeletonGraph(nx.Graph):
     """
     A custom subclass of NetworkX tailored for graphs constructed from SWC
     files, where each connected component represents a single SWC file.
     """
+
+    # Maps node attribute name to the (dtype, trailing shape) of its array.
+    # Each entry is exposed as a "node_<name>" array indexed by node ID.
+    NODE_ATTR_SPEC = {
+        "component_id": (int, ()),
+        "radius": (np.float16, ()),
+        "xyz": (np.float32, (3,)),
+    }
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        register_node_attrs(cls)
 
     def __init__(
         self,
@@ -73,9 +132,7 @@ class SkeletonGraph(nx.Graph):
         )(swc_pointer)
 
         num_nodes = count_nodes(irreducibles)
-        self.node_component_id = np.zeros((num_nodes,), dtype=int)
-        self.node_radius = np.zeros((num_nodes,), dtype=np.float16)
-        self.node_xyz = np.zeros((num_nodes, 3), dtype=np.float32)
+        self.init_node_attrs(num_nodes)
 
         component_id = 0
         while irreducibles:
@@ -84,6 +141,51 @@ class SkeletonGraph(nx.Graph):
 
         self.check_swc_ids()
         self.set_kdtree()
+
+    # --- Node Attributes ---
+    def init_node_attrs(self, num_nodes):
+        """
+        Allocates a zeroed array for every registered node attribute.
+
+        Parameters
+        ----------
+        num_nodes : int
+            Number of nodes to allocate space for.
+        """
+        store = _node_attr_store(self)
+        for name, (dtype, shape) in self.NODE_ATTR_SPEC.items():
+            store[name] = np.zeros((num_nodes, *shape), dtype=dtype)
+
+    def reindex_node_attrs(self, old_node_ids):
+        """
+        Reorders every registered node attribute to match a new node ID
+        ordering.
+
+        Parameters
+        ----------
+        old_node_ids : numpy.ndarray
+            Old node IDs, ordered by their new node ID.
+        """
+        store = _node_attr_store(self)
+        for name in self.NODE_ATTR_SPEC:
+            if name in store:
+                store[name] = store[name][old_node_ids]
+
+    def copy_node_attrs(self, graph, idxs=None):
+        """
+        Copies every registered node attribute into another graph.
+
+        Parameters
+        ----------
+        graph : SkeletonGraph
+            Graph that node attributes are copied into.
+        idxs : numpy.ndarray, optional
+            Node IDs to copy, ordered by their node ID in "graph". Copies
+            every node if None. Default is None.
+        """
+        src, dst = _node_attr_store(self), _node_attr_store(graph)
+        for name, arr in src.items():
+            dst[name] = arr.copy() if idxs is None else arr[idxs]
 
     # --- Build Graph ---
     def add_connected_component(self, irreducibles, component_id):
@@ -206,9 +308,7 @@ class SkeletonGraph(nx.Graph):
         for i, j in old_edge_ids:
             self.add_edge(old_to_new[i], old_to_new[j])
 
-        self.node_radius = self.node_radius[old_node_ids]
-        self.node_xyz = self.node_xyz[old_node_ids]
-        self.node_component_id = self.node_component_id[old_node_ids]
+        self.reindex_node_attrs(old_node_ids)
 
         self.reassign_component_ids()
         self.set_kdtree()
@@ -688,8 +788,7 @@ class SkeletonGraph(nx.Graph):
                     visited.add(j)
                     idxs.append(j)
         idxs = np.array(idxs, dtype=int)
-        subgraph.node_radius = self.node_radius[idxs]
-        subgraph.node_xyz = self.node_xyz[idxs]
+        self.copy_node_attrs(subgraph, idxs)
         return subgraph
 
     def set_kdtree(self):
