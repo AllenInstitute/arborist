@@ -82,6 +82,7 @@ class SkeletonGraph(nx.Graph):
     NODE_ATTR_SPEC = {
         "component_id": (int, ()),
         "radius": (np.float16, ()),
+        "type": (np.uint8, ()),
         "xyz": (np.float32, (3,)),
     }
 
@@ -155,6 +156,24 @@ class SkeletonGraph(nx.Graph):
         store = _node_attr_store(self)
         for name, (dtype, shape) in self.NODE_ATTR_SPEC.items():
             store[name] = np.zeros((num_nodes, *shape), dtype=dtype)
+
+    def grow_node_attrs(self, num_nodes):
+        """
+        Grows every registered node attribute to hold "num_nodes" nodes,
+        preserving the values of existing nodes.
+
+        Parameters
+        ----------
+        num_nodes : int
+            Number of nodes to allocate space for.
+        """
+        store = _node_attr_store(self)
+        for name, (dtype, shape) in self.NODE_ATTR_SPEC.items():
+            grown = np.zeros((num_nodes, *shape), dtype=dtype)
+            arr = store.get(name)
+            if arr is not None:
+                grown[: len(arr)] = arr
+            store[name] = grown
 
     def reindex_node_attrs(self, old_node_ids):
         """
@@ -230,6 +249,7 @@ class SkeletonGraph(nx.Graph):
             new_id = self.number_of_nodes()
             self.node_component_id[new_id] = component_id
             self.node_radius[new_id] = attrs["radius"]
+            self.node_type[new_id] = attrs["type"]
             self.node_xyz[new_id] = attrs["xyz"]
             self.add_node(new_id)
             node_id_mapping[node_id] = new_id
@@ -253,8 +273,8 @@ class SkeletonGraph(nx.Graph):
         dist_j = distance.euclidean(self.node_xyz[j], attrs["xyz"][0])
         start, end = (i, j) if dist_i < dist_j else (j, i)
 
-        iterator = zip(attrs["radius"], attrs["xyz"])
-        for cnt, (radius, xyz) in enumerate(iterator):
+        iterator = zip(attrs["radius"], attrs["type"], attrs["xyz"])
+        for cnt, (radius, node_type, xyz) in enumerate(iterator):
             if cnt > 0 and cnt < len(attrs["xyz"]) - 1:
                 new_id = self.number_of_nodes()
                 if cnt == 1:
@@ -263,6 +283,7 @@ class SkeletonGraph(nx.Graph):
                     self.add_edge(new_id, new_id - 1)
                 self.node_component_id[new_id] = component_id
                 self.node_radius[new_id] = radius
+                self.node_type[new_id] = node_type
                 self.node_xyz[new_id] = xyz
         self.add_edge(new_id, end)
 
@@ -450,9 +471,12 @@ class SkeletonGraph(nx.Graph):
         def write_entry(node, parent):
             x, y, z = self.node_xyz[node]
             r = self.node_radius[node] if use_radius else 2
+            # Nodes not loaded from an SWC file have no type, so fall back to
+            # the axon type that was previously written for every node
+            t = self.node_type[node] or 2
             node_to_idx[node] = cnt
             text_buffer.write(
-                f"\n{cnt} 2 {x} {y} {z} {r} {node_to_idx[parent]}"
+                f"\n{cnt} {t} {x} {y} {z} {r} {node_to_idx[parent]}"
             )
 
         with StringIO() as text_buffer:

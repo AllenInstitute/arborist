@@ -123,16 +123,22 @@ class GraphLoader:
         irr_edges = dict()
 
         radius = graph.graph["radius"]
+        node_type = graph.graph["type"]
         xyz = graph.graph["xyz"]
 
         root, cable_length = None, 0
         for i, j in nx.dfs_edges(graph, source=leaf):
             if root is None:
                 root, edge_length = i, 0
-                attrs = {"radius": [radius[i]], "xyz": [xyz[i]]}
+                attrs = {
+                    "radius": [radius[i]],
+                    "type": [node_type[i]],
+                    "xyz": [xyz[i]],
+                }
 
             edge_length += np.linalg.norm(xyz[i] - xyz[j])
             attrs["radius"].append(radius[j])
+            attrs["type"].append(node_type[j])
             attrs["xyz"].append(xyz[j])
 
             if graph.degree[j] != 2:
@@ -161,6 +167,10 @@ class GraphLoader:
     def _resample_edge(self, graph, attrs, edge, n_pts):
         attrs["xyz"] = geometry.resample_curve_3d(attrs["xyz"], n_pts=n_pts)
         attrs["radius"] = geometry.resample_curve_1d(attrs["radius"], n_pts)
+        # Keyed to the resampled xyz so that the arrays cannot drift apart
+        attrs["type"] = geometry.resample_labels_1d(
+            attrs["type"], len(attrs["xyz"])
+        )
         graph.graph["xyz"][edge[0]] = attrs["xyz"][0]
         graph.graph["xyz"][edge[1]] = attrs["xyz"][-1]
 
@@ -210,7 +220,11 @@ def prune_branches(graph, depth):
 
 def _set_node_attrs(graph, nodes):
     xyz, radius = graph.graph["xyz"], graph.graph["radius"]
-    return {i: {"radius": radius[i], "xyz": xyz[i]} for i in nodes}
+    node_type = graph.graph["type"]
+    return {
+        i: {"radius": radius[i], "type": node_type[i], "xyz": xyz[i]}
+        for i in nodes
+    }
 
 
 def _set_edge_attrs(graph, attrs):
@@ -224,4 +238,5 @@ def _set_edge_attrs(graph, attrs):
 def _to_numpy(attrs):
     attrs["xyz"] = np.array(attrs["xyz"], dtype=np.float32)
     attrs["radius"] = np.array(attrs["radius"], dtype=np.float16)
+    attrs["type"] = np.array(attrs["type"], dtype=np.uint8)
     return attrs

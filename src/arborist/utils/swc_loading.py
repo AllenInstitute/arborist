@@ -103,6 +103,7 @@ class Reader:
                 - "id": unique identifier of each node in an SWC file.
                 - "pid": parent ID of each node.
                 - "radius": radius value corresponding to each node.
+                - "type": node type (e.g. soma, axon, dendrite) of each node.
                 - "xyz": coordinate corresponding to each node.
                 - "filename": filename of SWC file
                 - "swc_id": name of SWC file, minus the ".swc".
@@ -389,6 +390,7 @@ class Reader:
             "id": np.zeros(n, dtype=int),
             "pid": np.zeros(n, dtype=int),
             "radius": np.zeros(n, dtype=float),
+            "type": np.zeros(n, dtype=np.uint8),
             "xyz": np.zeros((n, 3), dtype=np.int32),
             "soma_nodes": set(),
             "swc_name": swc_name,
@@ -398,8 +400,9 @@ class Reader:
             swc_dict["id"][i] = parts[0]
             swc_dict["pid"][i] = parts[-1]
             swc_dict["radius"][i] = float(parts[-2])
+            swc_dict["type"][i] = int(parts[1])
             swc_dict["xyz"][i] = self._read_coord(parts[2:5], offset)
-            if int(parts[1]) == 1:
+            if swc_dict["type"][i] == 1:
                 swc_dict["soma_nodes"].add(parts[0])
         if swc_dict["radius"][0] > 100:
             swc_dict["radius"] /= 1000
@@ -495,6 +498,7 @@ def to_graph(swc_dict):
     graph = nx.Graph(
         swc_name=swc_dict["swc_name"],
         radius=swc_dict["radius"],
+        type=swc_dict["type"],
         xyz=swc_dict["xyz"],
     )
     graph.add_edges_from(edges)

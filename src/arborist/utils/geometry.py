@@ -91,6 +91,31 @@ def resample_curve_1d(pts, n_pts=None, s=None):
     return spline(t)
 
 
+def resample_labels_1d(labels, n_pts=None):
+    """
+    Resamples a 1D array of categorical labels by nearest neighbor. Spline
+    based resampling is not applicable to categorical values, since it
+    produces values that are not valid labels.
+
+    Parameters
+    ----------
+    labels : numpy.ndarray
+        Labels to resample.
+    n_pts : int, optional
+        Number of output points. Default is None (same as input).
+
+    Returns
+    -------
+    numpy.ndarray
+        Resampled labels of length "n_pts", with the same dtype as "labels".
+    """
+    n_out = n_pts or len(labels)
+    if len(labels) == 1:
+        return np.repeat(labels, n_out, axis=0)
+    idxs = np.linspace(0, len(labels) - 1, n_out).round().astype(int)
+    return labels[idxs]
+
+
 def resample_curve_3d(pts, n_pts=None, s=None):
     """
     Smooths an (N, 3) curve by fitting a spline and resampling it.
