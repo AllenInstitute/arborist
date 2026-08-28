@@ -815,6 +815,42 @@ class CSRGraph:
         return subgraph
 
     # --- Serialization ---
+    def copy_structure_from(self, graph):
+        """
+        Replaces this graph's adjacency structure with an independent copy of
+        another's. This is the CSR stand-in for nx's "update", which the
+        FragmentsGraph <-> ProposalGraph conversions used to merge the source's
+        adjacency dicts into a bare instance.
+
+        Parameters
+        ----------
+        graph : CSRGraph
+            Graph to copy the structure from.
+        """
+        self.insertion_order = graph.insertion_order
+        self._num_ids = graph._num_ids
+        self._clock = graph._clock
+        self._indptr = graph._indptr.copy()
+        self._nbr = array("i")
+        self._nbr.frombytes(graph._nbr.tobytes())
+        self._indices = (
+            np.frombuffer(self._nbr, dtype=np.int32) if len(self._nbr)
+            else np.zeros(0, dtype=np.int32)
+        )
+        self._edge_time = (
+            None if graph._edge_time is None else graph._edge_time.copy()
+        )
+        self._pending = list(graph._pending)
+        self._pending_adj = {
+            i: list(nbrs) for i, nbrs in graph._pending_adj.items()
+        }
+        self._dropped = (
+            None if graph._dropped is None else graph._dropped.copy()
+        )
+        self._num_components = graph._num_components
+        self.rebuild_count = graph.rebuild_count
+        self._drop_caches()
+
     def __getstate__(self):
         """
         Excludes the ndarray view of the neighbour buffer, which cannot be
