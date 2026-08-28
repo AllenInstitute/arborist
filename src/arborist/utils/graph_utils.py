@@ -11,15 +11,6 @@ General-purpose graph utilities for tree-structured graphs.
 import networkx as nx
 
 
-def cycle_exists(graph):
-    """Returns True if the graph contains a cycle."""
-    try:
-        nx.find_cycle(graph)
-        return True
-    except nx.exception.NetworkXNoCycle:
-        return False
-
-
 def edges_to_line_graph(edges):
     """Constructs a NetworkX line graph from a list of edges."""
     graph = nx.Graph()

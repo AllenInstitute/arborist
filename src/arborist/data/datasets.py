@@ -12,7 +12,6 @@ from collections import defaultdict
 from copy import deepcopy
 from torch.utils.data import Dataset, DataLoader, Sampler
 
-import networkx as nx
 import numpy as np
 import pandas as pd
 import torch
@@ -74,7 +73,7 @@ class CurveDataset(Dataset):
 
     def __repr__(self):
         lengths = self.curve_lengths()
-        num_neurons = nx.number_connected_components(self.graph)
+        num_neurons = self.graph.number_connected_components()
         return (
             f"CurveDataset("
             f"\n   brain_id={self.brain_id}, "

@@ -4,8 +4,8 @@ Created on Wed July 2 14:00:00 2025
 @author: Anna Grim
 @email: anna.grim@alleninstitute.org
 
-Implementation of a custom subclass of NetworkX.Graph called "SkeletonGraph"
-that represents a tree-structured graph with 3D spatial geometry.
+Implementation of a graph class called "SkeletonGraph" that represents a
+tree-structured graph with 3D spatial geometry.
 
 """
 
@@ -16,11 +16,11 @@ from scipy.spatial import KDTree
 from scipy.spatial import distance
 from tqdm import tqdm
 
-import networkx as nx
 import numpy as np
 import os
 import zipfile as zf
 
+from arborist.csr_backing import CSRGraph
 from arborist.utils.graph_loading import GraphLoader, count_nodes
 
 
@@ -71,10 +71,10 @@ def register_node_attrs(cls):
 
 
 @register_node_attrs
-class SkeletonGraph(nx.Graph):
+class SkeletonGraph(CSRGraph):
     """
-    A custom subclass of NetworkX tailored for graphs constructed from SWC
-    files, where each connected component represents a single SWC file.
+    A graph class tailored for graphs constructed from SWC files, where each
+    connected component represents a single SWC file.
     """
 
     # Maps node attribute name to the (dtype, trailing shape) of its array.
@@ -95,6 +95,7 @@ class SkeletonGraph(nx.Graph):
         anisotropy=(1.0, 1.0, 1.0),
         node_spacing=1,
         verbose=False,
+        insertion_order=False,
     ):
         """
         Instantiates a SkeletonGraph object.
@@ -108,13 +109,16 @@ class SkeletonGraph(nx.Graph):
             Distance (in microns) between neighboring nodes. Default is 1μm.
         verbose : bool, optional
             Indication of whether to display progress bars. Default is False.
+        insertion_order : bool, optional
+            Indication of whether to order adjacency by edge insertion time.
+            Default is False.
         """
-        super().__init__()
-        self.anisotropy = np.array(anisotropy)
-        self.component_id_to_swc_id = dict()
-        self.kdtree = None
-        self.node_spacing = node_spacing
-        self.verbose = verbose
+        super().__init__(
+            anisotropy=anisotropy,
+            node_spacing=node_spacing,
+            verbose=verbose,
+            insertion_order=insertion_order,
+        )
 
     # --- Load ---
     def load(self, swc_pointer):
@@ -290,7 +294,7 @@ class SkeletonGraph(nx.Graph):
     # --- Update Structure ---
     def check_swc_ids(self):
         visited = set()
-        for nodes in map(list, nx.connected_components(self)):
+        for nodes in map(list, self.connected_components()):
             swc_id = self.node_swc_id(nodes[0])
             if swc_id not in visited:
                 visited.add(swc_id)
@@ -309,7 +313,7 @@ class SkeletonGraph(nx.Graph):
         """
         self.check_swc_ids()
         component_id_to_swc_id = dict()
-        for i, nodes in enumerate(nx.connected_components(self), start=1):
+        for i, nodes in enumerate(self.connected_components(), start=1):
             nodes = np.array(list(nodes), dtype=int)
             component_id_to_swc_id[i] = self.node_swc_id(nodes[0])
             self.node_component_id[nodes] = i
@@ -319,16 +323,7 @@ class SkeletonGraph(nx.Graph):
         """
         Reassigns contiguous node IDs and updates all dependent structures.
         """
-        old_node_ids = np.array(self.nodes, dtype=int)
-        new_node_ids = np.arange(len(old_node_ids))
-        old_to_new = dict(zip(old_node_ids, new_node_ids))
-        old_edge_ids = list(self.edges)
-
-        self.clear()
-        self.add_nodes_from(new_node_ids)
-        for i, j in old_edge_ids:
-            self.add_edge(old_to_new[i], old_to_new[j])
-
+        old_node_ids, old_to_new = self._relabel_structure()
         self.reindex_node_attrs(old_node_ids)
 
         self.reassign_component_ids()
@@ -354,7 +349,7 @@ class SkeletonGraph(nx.Graph):
 
     def remove_small_components(self, min_size=20, relabel_nodes=True):
         rm_nodes = list()
-        for nodes in map(list, nx.connected_components(self)):
+        for nodes in map(list, self.connected_components()):
             length = self.cable_length(max_depth=min_size, root=nodes[0])
             if length < min_size:
                 rm_nodes.extend(nodes)
@@ -405,7 +400,7 @@ class SkeletonGraph(nx.Graph):
         """
         self.check_swc_ids()
         with zf.ZipFile(zip_path, "w") as zipfile:
-            for nodes in map(list, nx.connected_components(self)):
+            for nodes in map(list, self.connected_components()):
                 self.component_to_zipped_swc(zipfile, nodes[0], use_radius)
 
     def to_zipped_swcs_multithreaded(self, output_dir, use_radius=True):
@@ -427,14 +422,14 @@ class SkeletonGraph(nx.Graph):
             )
             return thread
 
-        n = nx.number_connected_components(self)
+        n = self.number_connected_components()
         batch_size = max(1, n / 1000) if n > 10**4 else n
         os.makedirs(output_dir, exist_ok=True)
 
         self.check_swc_ids()
         with ThreadPoolExecutor() as executor:
             batch, threads, zip_cnt = list(), list(), 0
-            for i, nodes in enumerate(nx.connected_components(self)):
+            for i, nodes in enumerate(self.connected_components()):
                 batch.append(nodes)
                 if len(batch) >= batch_size:
                     threads.append(create_job(list(batch), zip_cnt))
@@ -484,7 +479,7 @@ class SkeletonGraph(nx.Graph):
             cnt = 1
             node_to_idx = defaultdict(lambda: -1)
             write_entry(root, -1)
-            for i, j in nx.dfs_edges(self, source=root):
+            for i, j in self.dfs_edges(source=root):
                 cnt += 1
                 write_entry(j, i)
 
@@ -521,7 +516,7 @@ class SkeletonGraph(nx.Graph):
             Cable length.
         """
         cable_length = 0
-        for i, j in nx.dfs_edges(self, source=root):
+        for i, j in self.dfs_edges(source=root):
             cable_length += self.dist(i, j)
             if cable_length > max_depth:
                 break
@@ -541,7 +536,7 @@ class SkeletonGraph(nx.Graph):
         d_gt, _ = gt_graph.kdtree.query(self.node_xyz)
         nodes = np.where(d_gt > dist)[0]
         self.remove_nodes_from(nodes)
-        for nodes in list(nx.connected_components(self)):
+        for nodes in list(self.connected_components()):
             if len(nodes) < 30:
                 self.remove_nodes_from(nodes)
         self.relabel_nodes()
@@ -613,7 +608,7 @@ class SkeletonGraph(nx.Graph):
         """
         connecting_nodes = set()
         for target in nodes[1:]:
-            path = nx.shortest_path(self, source=nodes[0], target=target)
+            path = self.shortest_path(nodes[0], target)
             connecting_nodes = connecting_nodes.union(set(path))
         return connecting_nodes
 
@@ -828,7 +823,7 @@ class SkeletonGraph(nx.Graph):
         return set(self.component_id_to_swc_id.values())
 
     def __repr__(self):
-        n_components = format(nx.number_connected_components(self), ",")
+        n_components = format(self.number_connected_components(), ",")
         n_nodes = format(self.number_of_nodes(), ",")
         n_edges = format(self.number_of_edges(), ",")
         return (
