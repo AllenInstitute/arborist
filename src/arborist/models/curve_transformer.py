@@ -4,8 +4,6 @@ Created on Wed June 10 12:00:00 2026
 @author: Anna Grim
 @email: anna.grim@alleninstitute.org
 
-...
-
 """
 
 import json
@@ -15,24 +13,20 @@ import torch.nn as nn
 
 class CurveEncoder(nn.Module):
     """
-    Transformer encoder that maps 3D first-order finite differences to a
-    latent vector. The curve is tokenized into fixed-length segments with a
-    class token. Each segment token is built from its flattened finite
-    differences concatenated with its normalized arc-length position in
-    [0, 1], letting the segment projection learn the geometry-position
-    relationship directly rather than injecting a separate positional
-    encoding. This makes the encoder robust to varying numbers of points
-    and path lengths.
+    Transformer encoder that maps 3D finite differences to a latent vector.
+     Curves are tokenized into fixed-length segments plus a class token, with
+      each segment encoding flattened finite differences and normalized arc-
+      length position.
     """
 
     def __init__(
         self,
-        segment_len=10,
+        d_ff=256,
         d_token=128,
+        latent_dim=64,
         n_heads=4,
         n_layers=4,
-        d_ff=256,
-        latent_dim=64,
+        segment_len=10,
         dropout=0.1,
     ):
         """
@@ -157,6 +151,8 @@ class AutoregressiveINRDecoder(nn.Module):
         dropout=0.1,
     ):
         """
+        Instantiates a AutoregressiveINRDecoder object.
+
         Parameters
         ----------
         segment_len : int
@@ -314,13 +310,14 @@ class CurveAutoencoder(nn.Module):
         return z
 
     # --- Helpers ---
-    def save_config(self, path):
-        with open(path, "w") as f:
-            json.dump(self.config, f)
+    def save(self, path):
+        torch.save(
+            {"config": self.config, "state_dict": self.state_dict()}, path
+        )
 
     @classmethod
     def load(cls, path):
         checkpoint = torch.load(path)
         model = cls(**checkpoint["config"])
-        model.load_state_dict(checkpoint["model_state_dict"])
+        model.load_state_dict(checkpoint["state_dict"])
         return model
