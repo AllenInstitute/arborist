@@ -241,6 +241,110 @@ class AutoregressiveINRDecoder(nn.Module):
         return out.reshape(B, n_segments * self.segment_len, 3)
 
 
+class AutoregressiveINRLSTMDecoder(nn.Module):
+    """
+    Autoregressive implicit neural representation decoder using an LSTM. At
+    each step, predicts the i-th segment's differences conditioned on the
+    global latent z, arc position t_i, and previous segment's predicted diffs
+    T_{i-1}.
+
+        T_i = F(z, t_i | T_{i-1})
+
+    The LSTM hidden and cell states carry long-range context from all previous
+    segments, while T_{i-1} provides an explicit local continuity signal.
+    """
+
+    def __init__(
+        self,
+        segment_len=10,
+        latent_dim=32,
+        d_hidden=256,
+        n_layers=4,
+        n_frequencies=16,
+        dropout=0.1,
+    ):
+        """
+        Parameters
+        ----------
+        segment_len : int
+            Number of points per segment.
+        latent_dim : int
+            Dimension of the input latent vector z.
+        d_hidden : int
+            LSTM hidden dimension.
+        n_layers : int
+            Number of LSTM layers.
+        n_frequencies : int
+            Number of Fourier frequency bands for positional encoding of t.
+        dropout : float
+            Dropout probability.
+        """
+        super().__init__()
+
+        self.latent_proj = nn.Linear(latent_dim, d_hidden)
+        self.n_frequencies = n_frequencies
+        self.segment_len = segment_len
+
+        d_seg = segment_len * 3
+        d_input = d_seg + 1 + latent_dim
+        self.lstm = nn.LSTM(
+            input_size=d_input,
+            hidden_size=d_hidden,
+            num_layers=n_layers,
+            batch_first=True,
+            dropout=dropout if n_layers > 1 else 0,
+        )
+        self.output_proj = nn.Sequential(
+            nn.LayerNorm(d_hidden),
+            nn.Linear(d_hidden, d_seg),
+        )
+
+    def forward(self, z, n_segments=None):
+        """
+        Parameters
+        ----------
+        z : torch.Tensor
+            Latent vector of shape (B, latent_dim).
+        n_segments : int, optional
+            Number of output segments to decode.
+
+        Returns
+        -------
+        torch.Tensor
+            Predicted finite differences.
+        """
+        B = z.shape[0]
+        n_segments = n_segments or 10
+        d_seg = self.segment_len * 3
+
+        # Seed hidden state from z; cell state initialized to zeros.
+        h = (
+            self.latent_proj(z)
+            .unsqueeze(0)
+            .expand(self.lstm.num_layers, -1, -1)
+            .contiguous()
+        )
+        c = torch.zeros_like(h)
+
+        t = torch.linspace(0, 1, n_segments, device=z.device)
+        pe = t.unsqueeze(-1)
+
+        outputs = []
+        T_prev = torch.zeros(B, d_seg, device=z.device)
+        for s in range(n_segments):
+            pe_s = pe[s].unsqueeze(0).expand(B, -1)
+            x_s = torch.cat([T_prev, pe_s, z], dim=-1).unsqueeze(1)
+
+            out, (h, c) = self.lstm(x_s, (h, c))
+            T_i = self.output_proj(out.squeeze(1))
+
+            outputs.append(T_i)
+            T_prev = T_i
+
+        out = torch.stack(outputs, dim=1)
+        return out.reshape(B, n_segments * self.segment_len, 3)
+
+
 class CurveAutoencoder(nn.Module):
 
     def __init__(
@@ -252,6 +356,7 @@ class CurveAutoencoder(nn.Module):
         d_ff=256,
         latent_dim=32,
         dropout=0.1,
+        decoder_type="gru",
     ):
         # Call parent class
         super().__init__()
@@ -265,6 +370,7 @@ class CurveAutoencoder(nn.Module):
             "d_ff": d_ff,
             "latent_dim": latent_dim,
             "dropout": dropout,
+            "decoder_type": decoder_type,
         }
 
         # Architecture
@@ -277,7 +383,12 @@ class CurveAutoencoder(nn.Module):
             latent_dim=latent_dim,
             dropout=dropout,
         )
-        self.decoder = AutoregressiveINRDecoder(
+        decoder_cls = (
+            AutoregressiveINRLSTMDecoder
+            if decoder_type == "lstm"
+            else AutoregressiveINRDecoder
+        )
+        self.decoder = decoder_cls(
             segment_len=segment_len,
             latent_dim=latent_dim,
             d_hidden=256,
