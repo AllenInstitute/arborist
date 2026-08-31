@@ -64,18 +64,38 @@ class _DegreeView:
     __slots__ = ("_degrees",)
 
     def __init__(self, degrees):
+        """
+        Instantiates a _DegreeView over a list of per-node degrees.
+
+        Parameters
+        ----------
+        degrees : List[int]
+            Degree of each node, indexed by node ID.
+        """
         self._degrees = degrees
 
     def __getitem__(self, i):
+        """
+        Returns the degree of node i.
+        """
         return self._degrees[i]
 
     def __call__(self, i=None):
+        """
+        Returns the degree of node i, or this view when i is None.
+        """
         return self if i is None else self._degrees[i]
 
     def __iter__(self):
+        """
+        Iterates over (node ID, degree) pairs.
+        """
         return iter(enumerate(self._degrees))
 
     def __len__(self):
+        """
+        Returns the number of nodes covered by this view.
+        """
         return len(self._degrees)
 
 
@@ -88,16 +108,33 @@ class _NodeView:
     __slots__ = ("_ids", "_id_set")
 
     def __init__(self, ids):
+        """
+        Instantiates a _NodeView over a collection of node IDs.
+
+        Parameters
+        ----------
+        ids : range or List[int]
+            Surviving node IDs.
+        """
         self._ids = ids
         self._id_set = None
 
     def __iter__(self):
+        """
+        Iterates over the node IDs.
+        """
         return iter(self._ids)
 
     def __len__(self):
+        """
+        Returns the number of nodes.
+        """
         return len(self._ids)
 
     def __contains__(self, i):
+        """
+        Returns whether node i is in this view.
+        """
         if isinstance(self._ids, range):
             return i in self._ids
         if self._id_set is None:
@@ -105,9 +142,15 @@ class _NodeView:
         return i in self._id_set
 
     def __getitem__(self, i):
+        """
+        Returns the i-th node ID in iteration order.
+        """
         return self._ids[i]
 
     def __repr__(self):
+        """
+        Returns a string summarizing this view.
+        """
         return f"_NodeView({len(self._ids)} nodes)"
 
 
@@ -156,6 +199,13 @@ class CSRGraph:
         self._init_structure()
 
     def _init_structure(self):
+        """
+        Resets the graph to empty CSR storage.
+
+        Kept separate from "__init__" so that classmethods building an instance
+        with "cls.__new__" can initialize the structure without going through
+        the constructor.
+        """
         self._num_ids = 0
         self._indptr = np.zeros(1, dtype=np.int64)
         self._nbr = array("i")
@@ -260,6 +310,9 @@ class CSRGraph:
         )
 
     def _drop_caches(self):
+        """
+        Invalidates every cache derived from the CSR arrays.
+        """
         self._degrees = None
         self._degree_view = None
         self._indptr_list = None
@@ -276,7 +329,9 @@ class CSRGraph:
         new_edges = np.asarray(self._pending, dtype=np.int64).reshape(-1, 2)
         times = np.concatenate([
             self._edge_times(),
-            np.arange(self._clock - len(new_edges), self._clock, dtype=np.int64)
+            np.arange(
+                self._clock - len(new_edges), self._clock, dtype=np.int64
+            ),
         ])
         self._pending = list()
         self._materialize(
@@ -284,6 +339,9 @@ class CSRGraph:
         )
 
     def _rows(self):
+        """
+        Returns the source node ID of every entry in "_indices".
+        """
         # Sized off indptr rather than _num_ids because add_edge and add_node
         # can grow the ID space ahead of the next rebuild.
         return np.repeat(
@@ -303,6 +361,10 @@ class CSRGraph:
         return edges[np.argsort(self._edge_time[keep], kind="stable")]
 
     def _edge_times(self):
+        """
+        Returns the insertion time of every edge, in the order "_edge_list"
+        returns them.
+        """
         if self._edge_time is None:
             return np.arange(len(self._indices) // 2, dtype=np.int64)
         rows = self._rows()
@@ -312,6 +374,10 @@ class CSRGraph:
 
     # --- Node Removal Mask ---
     def _drop_mask(self):
+        """
+        Returns the boolean removal mask, allocating or growing it to cover the
+        current ID space.
+        """
         if self._dropped is None:
             self._dropped = np.zeros(self._num_ids, dtype=bool)
         elif len(self._dropped) < self._num_ids:
@@ -322,6 +388,9 @@ class CSRGraph:
         return self._dropped
 
     def _surviving_ids(self):
+        """
+        Returns the IDs of the nodes that have not been removed.
+        """
         if self._dropped is None:
             return range(self._num_ids)
         return np.flatnonzero(~self._drop_mask()).tolist()
@@ -329,15 +398,24 @@ class CSRGraph:
     # --- Structure ---
     @property
     def nodes(self):
+        """
+        Returns a view over the surviving node IDs.
+        """
         return _NodeView(self._surviving_ids())
 
     @property
     def edges(self):
+        """
+        Returns every edge as an (i, j) tuple with i < j.
+        """
         self._flush()
         return [(int(i), int(j)) for i, j in self._edge_list()]
 
     @property
     def degree(self):
+        """
+        Returns a degree view supporting both "degree[i]" and "degree(i)".
+        """
         if self._degrees is None:
             degrees = np.diff(self._indptr).tolist()
             degrees.extend([0] * (self._num_ids - len(degrees)))
@@ -388,31 +466,56 @@ class CSRGraph:
         return base if extra is None else base + array("i", extra)
 
     def number_of_nodes(self):
+        """
+        Returns the number of surviving nodes.
+        """
         if self._dropped is None:
             return self._num_ids
         return int((~self._drop_mask()).sum())
 
     def number_of_edges(self):
+        """
+        Returns the number of edges, including pending ones.
+        """
         return len(self._indices) // 2 + len(self._pending)
 
     def has_node(self, i):
+        """
+        Returns whether node i exists and has not been removed.
+        """
         if not 0 <= i < self._num_ids:
             return False
         return self._dropped is None or not self._drop_mask()[i]
 
     def has_edge(self, i, j):
+        """
+        Returns whether the edge (i, j) exists.
+        """
         return self._has_edge(int(i), int(j))
 
     def __len__(self):
+        """
+        Returns the number of surviving nodes.
+        """
         return self.number_of_nodes()
 
     def __iter__(self):
+        """
+        Iterates over the surviving node IDs.
+        """
         return iter(self._surviving_ids())
 
     def __contains__(self, i):
+        """
+        Returns whether node i exists and has not been removed.
+        """
         return self.has_node(i)
 
     def _csr(self):
+        """
+        Returns the adjacency as a scipy CSR matrix, padded to the current ID
+        space, for the scipy.sparse.csgraph routines.
+        """
         self._flush()
         indptr = self._indptr
         if len(indptr) < self._num_ids + 1:
@@ -493,10 +596,21 @@ class CSRGraph:
             self._flush()
 
     def add_edges_from(self, edges):
+        """
+        Adds each edge in an iterable of (i, j) pairs.
+        """
         for i, j in edges:
             self.add_edge(i, j)
 
     def add_node(self, i):
+        """
+        Adds node i, growing the ID space or reviving a removed node.
+
+        Parameters
+        ----------
+        i : int
+            Node ID.
+        """
         i = int(i)
         if i < self._num_ids:
             if self._dropped is not None and self._drop_mask()[i]:
@@ -511,6 +625,9 @@ class CSRGraph:
         self._dsu = None
 
     def add_nodes_from(self, nodes):
+        """
+        Adds each node in an iterable of node IDs.
+        """
         for i in nodes:
             self.add_node(i)
 
@@ -612,6 +729,9 @@ class CSRGraph:
         return self._component_labels()
 
     def _find(self, x):
+        """
+        Returns the representative of label x, with path halving.
+        """
         dsu = self._dsu
         while dsu[x] != x:
             dsu[x] = dsu[dsu[x]]
@@ -619,6 +739,9 @@ class CSRGraph:
         return x
 
     def _union(self, i, j):
+        """
+        Merges the label classes of nodes i and j.
+        """
         a = self._find(int(self._labels[i]))
         b = self._find(int(self._labels[j]))
         if a != b:
@@ -647,10 +770,26 @@ class CSRGraph:
         return [set(c.tolist()) for c in np.split(order, bounds)]
 
     def number_connected_components(self):
+        """
+        Returns the number of connected components.
+        """
         self._component_labels()
         return self._num_components
 
     def node_connected_component(self, i):
+        """
+        Returns the node set of the component containing node i.
+
+        Parameters
+        ----------
+        i : int
+            Node ID.
+
+        Returns
+        -------
+        set
+            Node IDs in the same component as node i.
+        """
         labels = self._exact_labels()
         nodes = np.flatnonzero(labels == labels[i])
         if self._dropped is not None:
@@ -863,6 +1002,10 @@ class CSRGraph:
         return state
 
     def __setstate__(self, state):
+        """
+        Restores the neighbour buffer and rebuilds the ndarray view that
+        "__getstate__" dropped, so the two share memory again.
+        """
         nbr_bytes = state.pop("_nbr")
         self.__dict__.update(state)
         self._nbr = array("i")
@@ -873,6 +1016,10 @@ class CSRGraph:
         )
 
     def __deepcopy__(self, memo):
+        """
+        Deep-copies through the pickle protocol, so the copy's ndarray view
+        aliases the copy's own neighbour buffer rather than the original's.
+        """
         graph = self.__class__.__new__(self.__class__)
         memo[id(self)] = graph
         graph.__setstate__(deepcopy(self.__getstate__(), memo))

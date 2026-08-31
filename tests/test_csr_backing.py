@@ -490,7 +490,9 @@ class CSRMutationTest(unittest.TestCase):
         self.assertEqual(
             self.reference.number_of_nodes(), self.graph.number_of_nodes()
         )
-        self.assertEqual(sorted(self.reference.nodes), sorted(self.graph.nodes))
+        self.assertEqual(
+            sorted(self.reference.nodes), sorted(self.graph.nodes)
+        )
         for i in drop:
             self.assertFalse(self.graph.has_node(i))
             self.assertNotIn(i, self.graph.nodes)
