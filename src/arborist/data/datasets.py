@@ -292,8 +292,7 @@ class DatasetCollection(Dataset):
 
     def _precompute_val(self, n, seed):
         rng = np.random.default_rng(seed)
-        p = self.index["weight"].values
-        p = p / p.sum()
+        p = self.index["weight"].values / self.index["weight"].sum()
         idxs = rng.choice(len(self.index), size=n, replace=False, p=p)
         examples = []
         for i in idxs:
