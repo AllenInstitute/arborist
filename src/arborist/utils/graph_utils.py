@@ -51,10 +51,10 @@ def topological_decomposition(subgraph, root=0):
         ``topo_nodes``.
     """
     def is_topo(i):
-        deg = subgraph.degree[i]
+        deg = subgraph.degree(i)
         return i == root or deg == 1 or deg >= 3
 
-    topo_nodes = [i for i in range(subgraph.number_of_nodes()) if is_topo(i)]
+    topo_nodes = [i for i in range(subgraph.num_nodes()) if is_topo(i)]
     topo_idx = {n: k for k, n in enumerate(topo_nodes)}
 
     paths, edge_index = [], []

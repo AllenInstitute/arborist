@@ -20,7 +20,7 @@ dependencies = [
     "boto3",
     "google-cloud-storage",
     "matplotlib",
-    "networkx",
+    "rustworkx",
     "numpy",
     "pandas",
     "plotly",
