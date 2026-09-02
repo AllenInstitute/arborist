@@ -29,6 +29,19 @@ class SkeletonGraph(rx.PyGraph):
     A custom subclass of rustworkx.PyGraph tailored for graphs constructed
     from SWC files, where each connected component represents a single SWC
     file.
+
+    Attributes
+    ----------
+    node_feats : Dict[str, numpy.ndarray]
+        Node-level features, each an array of length ``num_nodes()`` indexed
+        by node ID. Populated by ``load`` with:
+            - "radius": node radius in microns.
+            - "type": SWC compartment code (e.g. 1 for soma, 2 for axon,
+              3 for basal dendrite, 4 for apical dendrite).
+    node_xyz : numpy.ndarray
+        Node coordinates, of shape (num_nodes, 3).
+    node_component_id : numpy.ndarray
+        Connected component ID of each node.
     """
 
     def __new__(cls, *args, **kwargs):
@@ -69,6 +82,7 @@ class SkeletonGraph(rx.PyGraph):
         self.anisotropy = np.array(anisotropy)
         self.component_id_to_swc_id = dict()
         self.kdtree = None
+        self.node_feats = dict()
         self.node_spacing = node_spacing
         self.verbose = verbose
         self.graph_loader = GraphLoader(
@@ -92,8 +106,11 @@ class SkeletonGraph(rx.PyGraph):
         # Create node-level attribute arrays
         num_nodes = count_nodes(irreducibles)
         self.node_component_id = np.zeros((num_nodes,), dtype=int)
-        self.node_radius = np.zeros((num_nodes,), dtype=np.float16)
         self.node_xyz = np.zeros((num_nodes, 3), dtype=np.float32)
+        self.node_feats = {
+            "radius": np.zeros((num_nodes,), dtype=np.float16),
+            "type": np.zeros((num_nodes,), dtype=np.uint8),
+        }
 
         # Add connected components to graph
         component_id = 0
@@ -133,7 +150,8 @@ class SkeletonGraph(rx.PyGraph):
         ----------
         node_dict : dict
             Dictionary mapping original node IDs to their attributes. Each
-            value must be a dictionary containing the keys "radius" and "xyz".
+            value must be a dictionary containing the key "xyz" along with a
+            key for every feature in "node_feats".
         component_id : str
             Connected component ID.
 
@@ -146,8 +164,9 @@ class SkeletonGraph(rx.PyGraph):
         for node_id, attrs in node_dict.items():
             new_id = self.add_node(None)
             self.node_component_id[new_id] = component_id
-            self.node_radius[new_id] = attrs["radius"]
             self.node_xyz[new_id] = attrs["xyz"]
+            for key, values in self.node_feats.items():
+                values[new_id] = attrs[key]
             node_id_mapping[node_id] = new_id
         return node_id_mapping
 
@@ -170,11 +189,12 @@ class SkeletonGraph(rx.PyGraph):
         start, end = (i, j) if dist_i < dist_j else (j, i)
 
         prev_id = start
-        for radius, xyz in zip(attrs["radius"][1:-1], attrs["xyz"][1:-1]):
+        for k, xyz in enumerate(attrs["xyz"][1:-1], start=1):
             new_id = self.add_node(None)
             self.node_component_id[new_id] = component_id
-            self.node_radius[new_id] = radius
             self.node_xyz[new_id] = xyz
+            for key, values in self.node_feats.items():
+                values[new_id] = attrs[key][k]
             self.add_edge(prev_id, new_id, None)
             prev_id = new_id
         self.add_edge(prev_id, end, None)
@@ -222,7 +242,9 @@ class SkeletonGraph(rx.PyGraph):
         for i, j in old_edge_ids:
             self.add_edge(old_to_new[i], old_to_new[j], None)
 
-        self.node_radius = self.node_radius[old_node_ids]
+        self.node_feats = {
+            k: v[old_node_ids] for k, v in self.node_feats.items()
+        }
         self.node_xyz = self.node_xyz[old_node_ids]
         self.node_component_id = self.node_component_id[old_node_ids]
 
@@ -358,13 +380,23 @@ class SkeletonGraph(rx.PyGraph):
         use_radius : bool, optional
             Indication of whether to preserve radii or use default 2μm.
             Default is False.
+
+        Notes
+        -----
+        The compartment column is written from ``node_feats["type"]`` so that
+        it survives a load/write round-trip. Graphs built without that feature
+        fall back to 2 (axon), which is what this writer always emitted before.
         """
         def write_entry(node, parent):
             x, y, z = self.node_xyz[node]
-            r = self.node_radius[node] if use_radius else 2
+            r = self.node_feats["radius"][node] if use_radius else 2
+            t = (
+                self.node_feats["type"][node]
+                if "type" in self.node_feats else 2
+            )
             node_to_idx[node] = cnt
             text_buffer.write(
-                f"\n{cnt} 2 {x} {y} {z} {r} {node_to_idx[parent]}"
+                f"\n{cnt} {t} {x} {y} {z} {r} {node_to_idx[parent]}"
             )
 
         with StringIO() as text_buffer:
@@ -692,7 +724,7 @@ class SkeletonGraph(rx.PyGraph):
                     visited.add(j)
                     idxs.append(j)
         idxs = np.array(idxs, dtype=int)
-        subgraph.node_radius = self.node_radius[idxs]
+        subgraph.node_feats = {k: v[idxs] for k, v in self.node_feats.items()}
         subgraph.node_xyz = self.node_xyz[idxs]
         return subgraph
 
