@@ -269,8 +269,8 @@ class SkeletonGraph(rx.PyGraph):
 
     def remove_small_components(self, min_size=20, relabel_nodes=True):
         rm_nodes = list()
-        for nodes in map(list, rx.connected_components(self)):
-            length = self.cable_length(max_depth=min_size, root=nodes[0])
+        components, lengths = self.component_cable_lengths()
+        for nodes, length in zip(components, lengths):
             if length < min_size:
                 rm_nodes.extend(nodes)
         self.remove_nodes_from(rm_nodes)
@@ -462,6 +462,67 @@ class SkeletonGraph(rx.PyGraph):
                 break
         return cable_length
 
+    def edge_lengths(self):
+        """
+        Computes the Euclidean length of every edge at once.
+
+        Returns
+        -------
+        edges : numpy.ndarray
+            Edge endpoints, of shape (num_edges, 2).
+        lengths : numpy.ndarray
+            Length of each edge, of shape (num_edges,).
+        """
+        edges = np.asarray(self.edge_list(), dtype=np.int64)
+        if len(edges) == 0:
+            return edges.reshape(0, 2), np.zeros(0)
+        diffs = self.node_xyz[edges[:, 0]] - self.node_xyz[edges[:, 1]]
+        return edges, np.linalg.norm(diffs.astype(np.float64), axis=1)
+
+    def component_cable_lengths(self):
+        """
+        Computes the cable length of every connected component in one
+        vectorized pass, instead of a Python DFS per component. Works on the
+        current node indices, so it does not require a relabel after node
+        removal.
+
+        Returns
+        -------
+        components : List[Set[int]]
+            Connected components, as returned by rx.connected_components.
+        lengths : numpy.ndarray
+            Cable length of each component, aligned with "components".
+        """
+        components = rx.connected_components(self)
+        if len(components) == 0:
+            return components, np.zeros(0)
+
+        labels = np.empty(max(self.node_indices()) + 1, dtype=np.int64)
+        for k, nodes in enumerate(components):
+            labels[list(nodes)] = k
+
+        edges, lengths = self.edge_lengths()
+        weights = lengths if len(edges) else None
+        idxs = labels[edges[:, 0]] if len(edges) else np.zeros(0, np.int64)
+        totals = np.bincount(idxs, weights=weights, minlength=len(components))
+        return components, totals
+
+    def node_cable_lengths(self):
+        """
+        Gets, for every node, the cable length of the component containing
+        it.
+
+        Returns
+        -------
+        numpy.ndarray
+            Array indexed by node ID.
+        """
+        components, lengths = self.component_cable_lengths()
+        result = np.zeros(max(self.node_indices(), default=-1) + 1)
+        for nodes, length in zip(components, lengths):
+            result[list(nodes)] = length
+        return result
+
     def clip_to_skeleton(self, gt_graph, dist):
         """
         Removes nodes more than "dist" microns from "gt_graph".
@@ -647,16 +708,29 @@ class SkeletonGraph(rx.PyGraph):
         """
         Gets nodes connected to root up to max_dist microns.
         """
-        queue = [(root, 0)]
-        visited = {root}
+        return list(self.path_distances_within(root, max_dist).keys())
+
+    def path_distances_within(self, root, max_dist):
+        """
+        Computes the along-skeleton distance from root to every node within
+        max_dist microns of it. The traversal never leaves the neighborhood,
+        unlike a shortest-path query over the whole component.
+
+        Returns
+        -------
+        Dict[int, float]
+            Maps each reachable node to its path distance from root.
+        """
+        dists = {root: 0.0}
+        queue = [(root, 0.0)]
         while queue:
             i, dist_i = queue.pop()
             for j in self.neighbors(i):
                 dist_j = dist_i + self.dist(i, j)
-                if dist_j < max_dist and j not in visited:
+                if dist_j < max_dist and j not in dists:
+                    dists[j] = dist_j
                     queue.append((j, dist_j))
-                    visited.add(j)
-        return list(visited)
+        return dists
 
     def path_from_leaf(self, leaf, max_depth=np.inf):
         """
