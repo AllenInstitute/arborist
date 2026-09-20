@@ -9,9 +9,7 @@ that represents a tree-structured graph with 3D spatial geometry.
 
 """
 
-from collections import defaultdict
 from concurrent.futures import as_completed, ThreadPoolExecutor
-from io import StringIO
 from scipy.spatial import KDTree
 from tqdm import tqdm
 
@@ -387,35 +385,52 @@ class SkeletonGraph(rx.PyGraph):
         it survives a load/write round-trip. Graphs built without that feature
         fall back to 2 (axon), which is what this writer always emitted before.
         """
-        def write_entry(node, parent):
-            x, y, z = self.node_xyz[node]
-            r = self.node_feats["radius"][node] if use_radius else 2
-            t = (
-                self.node_feats["type"][node]
-                if "type" in self.node_feats else 2
-            )
-            node_to_idx[node] = cnt
-            text_buffer.write(
-                f"\n{cnt} {t} {x} {y} {z} {r} {node_to_idx[parent]}"
-            )
+        # DFS order gives each node's parent; column data is gathered with
+        # vectorized indexing and converted to Python scalars once, which is
+        # several times faster than per-node numpy scalar access.
+        edges = rx.dfs_edges(self, source=root)
+        n = len(edges) + 1
+        nodes = np.empty(n, dtype=np.int64)
+        nodes[0] = root
+        parents = np.full(n, -1, dtype=np.int64)
+        if edges:
+            edges = np.asarray(edges, dtype=np.int64)
+            nodes[1:] = edges[:, 1]
+            lut = np.empty(int(nodes.max()) + 1, dtype=np.int64)
+            lut[nodes] = np.arange(1, n + 1)
+            parents[1:] = lut[edges[:, 0]]
 
-        with StringIO() as text_buffer:
-            text_buffer.write("# id, type, z, y, x, r, pid")
-            cnt = 1
-            node_to_idx = defaultdict(lambda: -1)
-            write_entry(root, -1)
-            for i, j in rx.dfs_edges(self, source=root):
-                cnt += 1
-                write_entry(j, i)
+        xyz = np.round(self.node_xyz[nodes].astype(np.float64), 4).tolist()
+        if use_radius:
+            radius = self.node_feats["radius"][nodes].astype(np.float64)
+            radius = radius.tolist()
+        else:
+            radius = [2] * n
+        if "type" in self.node_feats:
+            types = self.node_feats["type"][nodes].tolist()
+        else:
+            types = [2] * n
 
-            # Deduplicate filename within zip
-            swc_id = self.node_swc_id(root)
-            name = f"{swc_id}.swc"
-            suffix = 0
-            while name in zipfile.namelist():
-                name = f"{swc_id}.{suffix}.swc"
-                suffix += 1
-            zipfile.writestr(name, text_buffer.getvalue())
+        lines = [
+            f"{i} {t} {x} {y} {z} {r} {p}"
+            for i, t, (x, y, z), r, p in zip(
+                range(1, n + 1), types, xyz, radius, parents.tolist()
+            )
+        ]
+        text = "# id, type, z, y, x, r, pid\n" + "\n".join(lines)
+
+        # Deduplicate filename within zip (getinfo is O(1); namelist is O(n))
+        swc_id = self.node_swc_id(root)
+        name = f"{swc_id}.swc"
+        suffix = 0
+        while True:
+            try:
+                zipfile.getinfo(name)
+            except KeyError:
+                break
+            name = f"{swc_id}.{suffix}.swc"
+            suffix += 1
+        zipfile.writestr(name, text)
 
     # --- Helpers ---
     def branching_nodes(self):
