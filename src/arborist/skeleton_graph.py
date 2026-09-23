@@ -107,7 +107,7 @@ class SkeletonGraph(rx.PyGraph):
         self.node_xyz = np.zeros((num_nodes, 3), dtype=np.float32)
         self.node_feats = {
             "radius": np.zeros((num_nodes,), dtype=np.float16),
-            "type": np.zeros((num_nodes,), dtype=np.uint8),
+            "type": np.zeros((num_nodes,), dtype=np.int8),
         }
 
         # Add connected components to graph
