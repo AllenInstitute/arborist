@@ -113,13 +113,15 @@ def _read_gcs_txt(path, client=None):
 
 def _list_s3_paths(path, extension=""):
     bucket_name, prefix = parse_cloud_path(path)
+    if prefix and not prefix.endswith("/"):
+        prefix += "/"
     s3 = boto3.client(
         "s3", config=_BotocoreConfig(signature_version=_UNSIGNED)
     )
-    response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
     paths = []
-    if "Contents" in response:
-        for obj in response["Contents"]:
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
+        for obj in page.get("Contents", []):
             filename = obj["Key"]
             if filename.endswith(extension):
                 paths.append(f"s3://{bucket_name}/{filename}")
