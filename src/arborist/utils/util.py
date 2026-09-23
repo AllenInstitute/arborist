@@ -92,10 +92,12 @@ def list_paths(dir_path, extension=""):
 
 def _list_gcs_paths(path, extension=""):
     bucket_name, prefix = parse_cloud_path(path)
+    if prefix and not prefix.endswith("/"):
+        prefix += "/"
     bucket = gcs_storage.Client().bucket(bucket_name)
     paths = []
     for name in [b.name for b in bucket.list_blobs(prefix=prefix)]:
-        if extension in name:
+        if name.endswith(extension):
             paths.append(os.path.join(f"gs://{bucket_name}", name))
     return sorted(paths)
 

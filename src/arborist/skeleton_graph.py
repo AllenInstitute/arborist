@@ -385,21 +385,31 @@ class SkeletonGraph(rx.PyGraph):
         it survives a load/write round-trip. Graphs built without that feature
         fall back to 2 (axon), which is what this writer always emitted before.
         """
-        # DFS order gives each node's parent; column data is gathered with
-        # vectorized indexing and converted to Python scalars once, which is
-        # several times faster than per-node numpy scalar access.
-        edges = rx.dfs_edges(self, source=root)
-        n = len(edges) + 1
-        nodes = np.empty(n, dtype=np.int64)
-        nodes[0] = root
-        parents = np.full(n, -1, dtype=np.int64)
-        if edges:
-            edges = np.asarray(edges, dtype=np.int64)
-            nodes[1:] = edges[:, 1]
-            lut = np.empty(int(nodes.max()) + 1, dtype=np.int64)
-            lut[nodes] = np.arange(1, n + 1)
-            parents[1:] = lut[edges[:, 0]]
+        # Step 1: DFS over the component in Python. rx.dfs_edges allocates
+        # a visited array over the whole graph on every call (7 ms at 13M
+        # nodes), so a per-component call made a full write of ~500k
+        # components take about an hour. Walking self.neighbors touches
+        # only the component. Each node's SWC id is its 1-based discovery
+        # index; its parent is the node it was discovered from.
+        nodes = [root]
+        parents = [-1]
+        swc_ids = {root: 1}
+        stack = [root]
+        while stack:
+            i = stack.pop()
+            for j in self.neighbors(i):
+                if j not in swc_ids:
+                    swc_ids[j] = len(nodes) + 1
+                    nodes.append(j)
+                    parents.append(swc_ids[i])
+                    stack.append(j)
+        n = len(nodes)
+        nodes = np.asarray(nodes, dtype=np.int64)
+        parents = np.asarray(parents, dtype=np.int64)
 
+        # Step 2: gather column data with vectorized indexing and convert to
+        # Python scalars once, which is several times faster than per-node
+        # numpy scalar access.
         xyz = np.round(self.node_xyz[nodes].astype(np.float64), 4).tolist()
         if use_radius:
             radius = self.node_feats["radius"][nodes].astype(np.float64)
