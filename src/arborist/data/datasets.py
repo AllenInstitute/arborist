@@ -56,9 +56,9 @@ class CurveDataset(Dataset):
         if self.transform:
             curve = self.transform(curve)
 
-        # Normalize
+        # Normalize — backward pass avoids aliasing without a copy
         curve -= curve[0]
-        curve[1:] -= curve[:-1].copy()
+        curve[-1:0:-1] -= curve[-2::-1]
         return curve
 
     # --- Helpers ---
