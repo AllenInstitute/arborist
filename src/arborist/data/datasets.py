@@ -58,7 +58,7 @@ class CurveDataset(Dataset):
 
         # Normalize
         curve -= curve[0]
-        curve[1:] -= curve[:-1]
+        curve[1:] -= curve[:-1].copy()
         return curve
 
     # --- Helpers ---
