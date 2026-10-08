@@ -97,7 +97,7 @@ class GraphDataset(Dataset):
     connectivity between them.
     """
 
-    def __init__(self, graph, root_nodes, max_depth=None, transform=None, graph_transform=None):
+    def __init__(self, graph, root_nodes, max_depth=None, graph_transform=None):
         """
         Instantiates a GraphDataset object.
 
@@ -109,9 +109,6 @@ class GraphDataset(Dataset):
             One root node per dataset item.
         max_depth : float
             Depth in microns for rooted subgraph extraction.
-        transform : callable, optional
-            Applied to each raw xyz array before differencing (e.g.
-            CurveTransforms for augmentation). Default is None.
         graph_transform : callable, optional
             Applied to the full (N_nodes, 3) node_xyz array of the rooted
             subgraph before path decomposition (e.g. GraphTransforms). Because
@@ -126,11 +123,9 @@ class GraphDataset(Dataset):
         self.graph = graph
         self.root_nodes = root_nodes
         self.max_depth = max_depth
-        self.transform = transform
         self.graph_transform = graph_transform
         self.config = {
             "max_depth": max_depth,
-            "transform": type(transform).__name__ if transform else None,
             "graph_transform": type(graph_transform).__name__ if graph_transform else None,
         }
 
@@ -147,8 +142,6 @@ class GraphDataset(Dataset):
         curves = []
         for path in paths:
             xyz = subgraph.node_xyz[path].copy()
-            if self.transform:
-                xyz = self.transform(xyz)
             xyz -= xyz[0]
             xyz[1:] -= xyz[:-1].copy()
             curves.append(xyz)
@@ -215,6 +208,9 @@ class TreeSample:
         phi_j_root_mean, so H_t(root, v) = sum_j basis[v,j]*exp(-lam_j*t).
     is_root : numpy.ndarray or None
         Shape (n,) float32. 1.0 for root-adjacent curves, 0.0 otherwise.
+    target : any, optional
+        Supervised label for this sample (scalar, array, or dict). Stored
+        alongside the sample so DataLoader batches can be self-contained.
     """
 
     def __init__(
@@ -225,6 +221,7 @@ class TreeSample:
         heat_lam=None,
         heat_basis=None,
         is_root=None,
+        target=None,
     ):
         self.curves = curves
         self.edge_index = edge_index
@@ -232,6 +229,7 @@ class TreeSample:
         self.heat_lam = heat_lam
         self.heat_basis = heat_basis
         self.is_root = is_root
+        self.target = target
 
     def __repr__(self):
         return (
