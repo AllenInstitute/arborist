@@ -45,6 +45,7 @@ most informative for the task.
 
 import math
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -136,10 +137,9 @@ class GraphTransformer(nn.Module):
         return basis @ exp_weights                                        # (n, k)
 
     def _hop_dist_matrix(self, n, edge_index):
-        """BFS all-pairs shortest-path distances; -1 for unreachable pairs."""
-        dist = [[-1] * n for _ in range(n)]
-        for i in range(n):
-            dist[i][i] = 0
+        """BFS fallback — returns int8 ndarray. Only used when hop_dist not precomputed."""
+        dist = np.full((n, n), -1, dtype=np.int8)
+        np.fill_diagonal(dist, 0)
         if edge_index.shape[1] > 0:
             adj = [[] for _ in range(n)]
             for a, b in edge_index.cpu().t().tolist():
@@ -149,7 +149,7 @@ class GraphTransformer(nn.Module):
                 while queue:
                     nxt = []
                     for u in queue:
-                        dist[src][u] = d
+                        dist[src, u] = d
                         for v in adj[u]:
                             if v not in seen:
                                 seen.add(v)
@@ -166,17 +166,17 @@ class GraphTransformer(nn.Module):
             type_mat[edge_index[0], edge_index[1]] = et
         return self.edge_type_emb(type_mat).permute(2, 0, 1)  # (n_heads, n, n)
 
-    def _rel_pe_bias(self, dist_list, n, device):
-        """Float attention bias (n_heads, n, n) from hop distances."""
-        dist_t = torch.tensor(dist_list, dtype=torch.long, device=device)
+    def _rel_pe_bias(self, hop_dist, device):
+        """Float attention bias (n_heads, n, n) from a hop distance ndarray or tensor."""
+        dist_t = torch.as_tensor(hop_dist, dtype=torch.long, device=device)
         bucket = dist_t.clamp(min=0, max=self.max_rel_dist + 1)
-        bucket[dist_t < 0] = self.max_rel_dist + 1        # unreachable
+        bucket[dist_t < 0] = self.max_rel_dist + 1
         bias = self.rel_pe_emb(bucket).permute(2, 0, 1)  # (n_heads, n, n)
         bias = bias.masked_fill(dist_t.unsqueeze(0) < 0, float('-inf'))
         return bias
 
     # --- Forward ---
-    def forward(self, x, edge_index, root_indices=None, heat_lam=None, heat_basis=None, edge_type=None):
+    def forward(self, x, edge_index, root_indices=None, heat_lam=None, heat_basis=None, edge_type=None, hop_dist=None):
         """
         Parameters
         ----------
@@ -205,8 +205,9 @@ class GraphTransformer(nn.Module):
         )
 
         # Build per-head float attention bias: hop distance + edge direction type
-        dist_list = self._hop_dist_matrix(n, edge_index)
-        attn_bias = self._rel_pe_bias(dist_list, n, device)   # (n_heads, n, n)
+        if hop_dist is None:
+            hop_dist = self._hop_dist_matrix(n, edge_index)
+        attn_bias = self._rel_pe_bias(hop_dist, device)        # (n_heads, n, n)
         if edge_type is not None:
             attn_bias = attn_bias + self._edge_type_bias(edge_index, edge_type, n, device)
 

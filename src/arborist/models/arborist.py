@@ -175,6 +175,26 @@ class Arborist(nn.Module):
         else:
             edge_type_ext = None
 
+        # Extend precomputed hop_dist to include CLS as node 0
+        orig_hop = getattr(sample, "hop_dist", None)
+        if orig_hop is not None:
+            orig = torch.as_tensor(orig_hop, dtype=torch.long, device=device)  # (n, n)
+            n_c = orig.shape[0]
+            hop_ext = torch.full((n_c + 1, n_c + 1), -1, dtype=torch.long, device=device)
+            hop_ext[0, 0] = 0
+            hop_ext[1:, 1:] = orig
+            # CLS row: 1 + min dist from any root curve to each curve
+            root_t = torch.tensor(root_indices or list(range(n_c)), dtype=torch.long, device=device)
+            min_d = orig[root_t].clone()
+            min_d[min_d < 0] = 127          # sentinel for unreachable before min
+            cls_row, _ = min_d.min(dim=0)   # (n_c,)
+            cls_row = cls_row + 1
+            cls_row[cls_row > 127] = -1     # propagate unreachable
+            hop_ext[0, 1:] = cls_row
+            hop_ext[1:, 0] = cls_row
+        else:
+            hop_ext = None
+
         # Contextualize all nodes; heat PE diffuses from CLS (index 0) as the root
         z_out = self.graph_transformer(
             z_all, edge_index_ext,
@@ -182,6 +202,7 @@ class Arborist(nn.Module):
             heat_lam=None,
             heat_basis=None,
             edge_type=edge_type_ext,
+            hop_dist=hop_ext,
         )
 
         # CLS token output is the global tree embedding; remaining nodes are per-curve

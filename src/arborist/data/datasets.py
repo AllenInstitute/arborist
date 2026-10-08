@@ -163,6 +163,7 @@ class GraphDataset(Dataset):
             k for k, (u, v) in enumerate(topo_edge_index) if 0 in (u, v)
         ]
         heat_lam, heat_basis = _compute_heat_basis(n, edge_index, root_curve_indices)
+        hop_dist = _compute_hop_dist(n, edge_index)
         is_root = np.zeros(n, dtype=np.float32)
         if root_curve_indices:
             is_root[root_curve_indices] = 1.0
@@ -175,6 +176,7 @@ class GraphDataset(Dataset):
             heat_basis=heat_basis,
             is_root=is_root,
             edge_type=edge_type,
+            hop_dist=hop_dist,
         )
 
     def __len__(self):
@@ -221,6 +223,10 @@ class TreeSample:
         Shape (E,) int64. Direction type for each line-graph edge, parallel
         to edge_index. Values are PARENT_TO_CHILD (0), CHILD_TO_PARENT (1),
         SIBLING (2). Used by GraphTransformer as per-head attention biases.
+    hop_dist : numpy.ndarray or None
+        Shape (n, n) int8. All-pairs BFS hop distances on the line graph,
+        precomputed so the model forward skips Python BFS entirely.
+        -1 encodes unreachable pairs.
     target : any, optional
         Supervised label for this sample (scalar, array, or dict). Stored
         alongside the sample so DataLoader batches can be self-contained.
@@ -235,6 +241,7 @@ class TreeSample:
         heat_basis=None,
         is_root=None,
         edge_type=None,
+        hop_dist=None,
         target=None,
     ):
         self.curves = curves
@@ -244,6 +251,7 @@ class TreeSample:
         self.heat_basis = heat_basis
         self.is_root = is_root
         self.edge_type = edge_type
+        self.hop_dist = hop_dist
         self.target = target
 
     def __repr__(self):
@@ -317,6 +325,29 @@ def _build_line_graph(topo_edge_index, topo_depths):
     if not src:
         return np.zeros((2, 0), dtype=np.int64), np.zeros(0, dtype=np.int64)
     return np.array([src, dst], dtype=np.int64), np.array(types, dtype=np.int64)
+
+
+def _compute_hop_dist(n, edge_index):
+    """BFS all-pairs shortest paths on the line graph. int8 array, -1 = unreachable."""
+    dist = np.full((n, n), -1, dtype=np.int8)
+    np.fill_diagonal(dist, 0)
+    if n <= 1 or edge_index.shape[1] == 0:
+        return dist
+    adj = [[] for _ in range(n)]
+    for u, v in edge_index.T.tolist():
+        adj[u].append(v)
+    for src in range(n):
+        queue, seen, d = [src], {src}, 0
+        while queue:
+            nxt = []
+            for u in queue:
+                dist[src, u] = d
+                for v in adj[u]:
+                    if v not in seen:
+                        seen.add(v)
+                        nxt.append(v)
+            queue, d = nxt, d + 1
+    return dist
 
 
 def _compute_heat_basis(n, edge_index, root_indices):
