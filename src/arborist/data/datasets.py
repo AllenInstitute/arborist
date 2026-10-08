@@ -145,39 +145,15 @@ class GraphDataset(Dataset):
             subgraph.node_xyz = self.graph_transform(subgraph.node_xyz)
         _, paths, topo_edge_index = topological_decomposition(subgraph)
 
-        # Create list of curves
+        # Translate and difference each curve
         curves = []
         for path in paths:
             xyz = subgraph.node_xyz[path].copy()
             xyz -= xyz[0]
-            xyz[1:] -= xyz[:-1].copy()
+            xyz[-1:0:-1] -= xyz[-2::-1]
             curves.append(xyz)
 
-        # Line-graph connectivity and directional edge types from BFS depths
-        topo_depths = _topo_depths(topo_edge_index)
-        edge_index, edge_type = _build_line_graph(topo_edge_index, topo_depths)
-
-        # Root-relative structural features: which curves touch the root, heat basis, root flag
-        n = len(curves)
-        root_curve_indices = [
-            k for k, (u, v) in enumerate(topo_edge_index) if 0 in (u, v)
-        ]
-        heat_lam, heat_basis = _compute_heat_basis(n, edge_index, root_curve_indices)
-        hop_dist = _compute_hop_dist(n, edge_index)
-        is_root = np.zeros(n, dtype=np.float32)
-        if root_curve_indices:
-            is_root[root_curve_indices] = 1.0
-
-        return TreeSample(
-            curves=curves,
-            edge_index=edge_index,
-            root_curve_indices=root_curve_indices,
-            heat_lam=heat_lam,
-            heat_basis=heat_basis,
-            is_root=is_root,
-            edge_type=edge_type,
-            hop_dist=hop_dist,
-        )
+        return build_tree_sample(curves, topo_edge_index)
 
     def __len__(self):
         return len(self.root_nodes)
@@ -325,6 +301,52 @@ def _build_line_graph(topo_edge_index, topo_depths):
     if not src:
         return np.zeros((2, 0), dtype=np.int64), np.zeros(0, dtype=np.int64)
     return np.array([src, dst], dtype=np.int64), np.array(types, dtype=np.int64)
+
+
+def build_tree_sample(curves, topo_edge_index, target=None):
+    """
+    Build a fully-annotated TreeSample from preprocessed curves and topology.
+
+    Computes every structural field the model uses — edge types, heat-diffusion
+    basis, hop distances, and root flags — so model forward passes skip all
+    Python-side computation. All callers that construct TreeSamples should go
+    through this factory to stay consistent.
+
+    Parameters
+    ----------
+    curves : List[numpy.ndarray]
+        Finite-difference curve arrays (already translated and differenced),
+        each of shape (N_i, 3).
+    topo_edge_index : List[Tuple[int, int]]
+        Topological graph edges, one per curve, as (src_topo, dst_topo) pairs.
+        Node 0 is the root.
+    target : any, optional
+        Supervised label to embed in the sample.
+
+    Returns
+    -------
+    TreeSample
+    """
+    topo_depths = _topo_depths(topo_edge_index)
+    edge_index, edge_type = _build_line_graph(topo_edge_index, topo_depths)
+    n = len(curves)
+    root_curve_indices = [k for k, (u, v) in enumerate(topo_edge_index) if 0 in (u, v)]
+    heat_lam, heat_basis = _compute_heat_basis(n, edge_index, root_curve_indices)
+    hop_dist = _compute_hop_dist(n, edge_index)
+    is_root = np.zeros(n, dtype=np.float32)
+    if root_curve_indices:
+        is_root[root_curve_indices] = 1.0
+    return TreeSample(
+        curves=curves,
+        edge_index=edge_index,
+        root_curve_indices=root_curve_indices,
+        heat_lam=heat_lam,
+        heat_basis=heat_basis,
+        is_root=is_root,
+        edge_type=edge_type,
+        hop_dist=hop_dist,
+        target=target,
+    )
 
 
 def _compute_hop_dist(n, edge_index):
