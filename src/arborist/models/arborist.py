@@ -162,12 +162,26 @@ class Arborist(nn.Module):
         cls_edges = torch.stack([torch.cat([cls_src, cls_dst]), torch.cat([cls_dst, cls_src])])
         edge_index_ext = torch.cat([edge_index_ext, cls_edges], dim=1)
 
+        # Extend edge_type: original types shift cleanly; CLS→root is P2C, root→CLS is C2P
+        orig_et = getattr(sample, "edge_type", None)
+        if orig_et is not None:
+            cls_et = torch.cat([
+                torch.zeros(len(root_shifted), dtype=torch.long, device=device),  # CLS→root: P2C
+                torch.ones(len(root_shifted), dtype=torch.long, device=device),   # root→CLS: C2P
+            ])
+            edge_type_ext = torch.cat([
+                torch.as_tensor(orig_et, dtype=torch.long, device=device), cls_et
+            ])
+        else:
+            edge_type_ext = None
+
         # Contextualize all nodes; heat PE diffuses from CLS (index 0) as the root
         z_out = self.graph_transformer(
             z_all, edge_index_ext,
             root_indices=[0],
-            heat_lam=None,   # extended graph not precomputed in dataset
+            heat_lam=None,
             heat_basis=None,
+            edge_type=edge_type_ext,
         )
 
         # CLS token output is the global tree embedding; remaining nodes are per-curve

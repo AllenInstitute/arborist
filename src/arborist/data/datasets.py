@@ -20,6 +20,13 @@ from arborist.utils.graph_utils import topological_decomposition
 from arborist.utils.util import write_json
 
 
+# Line-graph edge direction types (stored on TreeSample.edge_type)
+PARENT_TO_CHILD = 0   # curve i is closer to root than curve j
+CHILD_TO_PARENT = 1   # curve i is farther from root than curve j
+SIBLING = 2           # curves i and j share the same parent branch point
+NO_EDGE = 3           # default for pairs with no direct line-graph edge
+
+
 # --- Dataset Classes ---
 class CurveDataset(Dataset):
 
@@ -146,8 +153,9 @@ class GraphDataset(Dataset):
             xyz[1:] -= xyz[:-1].copy()
             curves.append(xyz)
 
-        # Line-graph connectivity between curves
-        edge_index = _build_line_graph_edge_index(topo_edge_index)
+        # Line-graph connectivity and directional edge types from BFS depths
+        topo_depths = _topo_depths(topo_edge_index)
+        edge_index, edge_type = _build_line_graph(topo_edge_index, topo_depths)
 
         # Root-relative structural features: which curves touch the root, heat basis, root flag
         n = len(curves)
@@ -166,6 +174,7 @@ class GraphDataset(Dataset):
             heat_lam=heat_lam,
             heat_basis=heat_basis,
             is_root=is_root,
+            edge_type=edge_type,
         )
 
     def __len__(self):
@@ -208,6 +217,10 @@ class TreeSample:
         phi_j_root_mean, so H_t(root, v) = sum_j basis[v,j]*exp(-lam_j*t).
     is_root : numpy.ndarray or None
         Shape (n,) float32. 1.0 for root-adjacent curves, 0.0 otherwise.
+    edge_type : numpy.ndarray or None
+        Shape (E,) int64. Direction type for each line-graph edge, parallel
+        to edge_index. Values are PARENT_TO_CHILD (0), CHILD_TO_PARENT (1),
+        SIBLING (2). Used by GraphTransformer as per-head attention biases.
     target : any, optional
         Supervised label for this sample (scalar, array, or dict). Stored
         alongside the sample so DataLoader batches can be self-contained.
@@ -221,6 +234,7 @@ class TreeSample:
         heat_lam=None,
         heat_basis=None,
         is_root=None,
+        edge_type=None,
         target=None,
     ):
         self.curves = curves
@@ -229,6 +243,7 @@ class TreeSample:
         self.heat_lam = heat_lam
         self.heat_basis = heat_basis
         self.is_root = is_root
+        self.edge_type = edge_type
         self.target = target
 
     def __repr__(self):
@@ -237,6 +252,71 @@ class TreeSample:
             f"n_curves={len(self.curves)}, "
             f"n_edges={self.edge_index.shape[1]})"
         )
+
+
+def _topo_depths(topo_edge_index):
+    """BFS from topological node 0; returns {node: depth} for all reachable nodes."""
+    adj = defaultdict(list)
+    for u, v in topo_edge_index:
+        adj[u].append(v)
+        adj[v].append(u)
+    depth = {0: 0}
+    queue = [0]
+    while queue:
+        nxt = []
+        for u in queue:
+            for v in adj[u]:
+                if v not in depth:
+                    depth[v] = depth[u] + 1
+                    nxt.append(v)
+        queue = nxt
+    return depth
+
+
+def _build_line_graph(topo_edge_index, topo_depths):
+    """
+    Build the line-graph edge_index and a parallel edge_type array.
+
+    For each pair of curves (i, j) sharing a topological node t the edge
+    type is determined by whether t is the proximal (root-side) or distal
+    (leaf-side) endpoint of each curve:
+
+      PARENT_TO_CHILD  t == distal[i]   and t == proximal[j]
+      CHILD_TO_PARENT  t == proximal[i] and t == distal[j]
+      SIBLING          t == proximal[i] and t == proximal[j]
+    """
+    # Determine proximal/distal endpoint of each curve from BFS depths
+    proximal, distal = {}, {}
+    for k, (u, v) in enumerate(topo_edge_index):
+        if topo_depths.get(u, 0) <= topo_depths.get(v, 0):
+            proximal[k], distal[k] = u, v
+        else:
+            proximal[k], distal[k] = v, u
+
+    # Group curves by shared topological node
+    topo_to_curves = defaultdict(list)
+    for k, (u, v) in enumerate(topo_edge_index):
+        topo_to_curves[u].append(k)
+        topo_to_curves[v].append(k)
+
+    src, dst, types = [], [], []
+    for t, curves_at_t in topo_to_curves.items():
+        for i in curves_at_t:
+            for j in curves_at_t:
+                if i == j:
+                    continue
+                src.append(i)
+                dst.append(j)
+                if t == distal[i] and t == proximal[j]:
+                    types.append(PARENT_TO_CHILD)
+                elif t == proximal[i] and t == distal[j]:
+                    types.append(CHILD_TO_PARENT)
+                else:
+                    types.append(SIBLING)
+
+    if not src:
+        return np.zeros((2, 0), dtype=np.int64), np.zeros(0, dtype=np.int64)
+    return np.array([src, dst], dtype=np.int64), np.array(types, dtype=np.int64)
 
 
 def _compute_heat_basis(n, edge_index, root_indices):
@@ -503,4 +583,50 @@ def build_dataloader(
         num_workers=num_workers,
         pin_memory=True,
         sampler=sampler,
+    )
+
+
+def collate_trees(samples):
+    """
+    Collate a list of TreeSamples into a batch.
+
+    Trees vary in the number of curves, so they cannot be naively stacked.
+    The samples are returned as a plain list; targets, when present, are
+    stacked into a float tensor. The model is expected to loop over the list
+    and accumulate gradients across the batch.
+
+    Returns
+    -------
+    samples : List[TreeSample]
+    targets : torch.Tensor or None
+        Shape (B,) or (B, ...) if all samples carry a target, else None.
+    """
+    targets = None
+    if samples[0].target is not None:
+        targets = torch.stack([
+            torch.as_tensor(s.target, dtype=torch.float32) for s in samples
+        ])
+    return samples, targets
+
+
+def build_graph_dataloader(dataset, batch_size=4, num_workers=0, shuffle=True):
+    """
+    DataLoader for GraphDataset — each batch is (list[TreeSample], targets).
+
+    Parameters
+    ----------
+    dataset : GraphDataset
+    batch_size : int, optional
+        Default is 4.
+    num_workers : int, optional
+        Default is 0.
+    shuffle : bool, optional
+        Default is True.
+    """
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        collate_fn=collate_trees,
+        num_workers=num_workers,
+        shuffle=shuffle,
     )

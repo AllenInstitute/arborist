@@ -81,6 +81,10 @@ class GraphTransformer(nn.Module):
         # Buckets: 0=self, 1..max_rel_dist=hop count, max_rel_dist+1=far/unreachable
         self.rel_pe_emb = nn.Embedding(max_rel_dist + 2, n_heads)
 
+        # Edge-type PE: per-head bias for parent→child (0), child→parent (1),
+        # sibling (2), and no-direct-edge (3)
+        self.edge_type_emb = nn.Embedding(4, n_heads)
+
         self.layers = nn.ModuleList([
             GraphTransformerLayer(latent_dim, n_heads, d_ff, dropout)
             for _ in range(n_layers)
@@ -153,6 +157,15 @@ class GraphTransformer(nn.Module):
                     queue, d = nxt, d + 1
         return dist
 
+    def _edge_type_bias(self, edge_index, edge_type, n, device):
+        """Per-head attention bias from line-graph edge types. (n_heads, n, n)"""
+        # Default: no-direct-edge (3) for all pairs; fill direct edges with their type
+        type_mat = torch.full((n, n), 3, dtype=torch.long, device=device)
+        if edge_index.shape[1] > 0:
+            et = torch.as_tensor(edge_type, dtype=torch.long, device=device)
+            type_mat[edge_index[0], edge_index[1]] = et
+        return self.edge_type_emb(type_mat).permute(2, 0, 1)  # (n_heads, n, n)
+
     def _rel_pe_bias(self, dist_list, n, device):
         """Float attention bias (n_heads, n, n) from hop distances."""
         dist_t = torch.tensor(dist_list, dtype=torch.long, device=device)
@@ -163,7 +176,7 @@ class GraphTransformer(nn.Module):
         return bias
 
     # --- Forward ---
-    def forward(self, x, edge_index, root_indices=None, heat_lam=None, heat_basis=None):
+    def forward(self, x, edge_index, root_indices=None, heat_lam=None, heat_basis=None, edge_type=None):
         """
         Parameters
         ----------
@@ -191,9 +204,11 @@ class GraphTransformer(nn.Module):
             self._heat_diffusion_pe(n, edge_index, root_indices, device, heat_lam, heat_basis)
         )
 
-        # Build per-head float attention bias from hop distances
+        # Build per-head float attention bias: hop distance + edge direction type
         dist_list = self._hop_dist_matrix(n, edge_index)
-        attn_bias = self._rel_pe_bias(dist_list, n, device)  # (n_heads, n, n)
+        attn_bias = self._rel_pe_bias(dist_list, n, device)   # (n_heads, n, n)
+        if edge_type is not None:
+            attn_bias = attn_bias + self._edge_type_bias(edge_index, edge_type, n, device)
 
         for layer in self.layers:
             x = layer(x, attn_bias)
