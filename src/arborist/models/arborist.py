@@ -99,7 +99,7 @@ class Arborist(nn.Module):
             n_pe_components=graph_n_pe_components,
             max_rel_dist=graph_max_rel_dist,
         )
-        self.pool = nn.Linear(latent_dim, 1)
+        self.cls_token = nn.Parameter(torch.zeros(latent_dim))
         self.root_proj = nn.Linear(1, latent_dim, bias=False)
 
     def _collate_curves(self, curves):
@@ -127,8 +127,8 @@ class Arborist(nn.Module):
         Returns
         -------
         z_tree : torch.Tensor
-            Shape (latent_dim,) — global tree embedding, mean-pooled over
-            all curve embeddings after graph contextualization.
+            Shape (latent_dim,) — global tree embedding from the CLS token
+            after graph contextualization.
         z_curves : torch.Tensor
             Shape (n_curves, latent_dim) — per-curve embeddings after the
             GraphTransformer contextualizes each curve by its neighbors.
@@ -150,21 +150,29 @@ class Arborist(nn.Module):
             is_root[root_indices] = 1.0
             z = z + self.root_proj(is_root)
 
-        # Contextualize curves over the skeleton topology with heat-diffusion PE
+        # Prepend CLS token; shift curve edge_index by 1 to make room
         edge_index = torch.as_tensor(sample.edge_index, dtype=torch.long, device=device)
-        z_curves = self.graph_transformer(
-            z, edge_index,
-            root_indices=root_indices,
-            heat_lam=getattr(sample, "heat_lam", None),
-            heat_basis=getattr(sample, "heat_basis", None),
+        edge_index_ext = edge_index + 1 if edge_index.shape[1] > 0 else edge_index
+        z_all = torch.cat([self.cls_token.unsqueeze(0), z], dim=0)
+
+        # Connect CLS (node 0) to root-adjacent curves so it acts as the virtual root
+        root_shifted = [r + 1 for r in root_indices] if root_indices else list(range(1, len(sample.curves) + 1))
+        cls_src = torch.zeros(len(root_shifted), dtype=torch.long, device=device)
+        cls_dst = torch.tensor(root_shifted, dtype=torch.long, device=device)
+        cls_edges = torch.stack([torch.cat([cls_src, cls_dst]), torch.cat([cls_dst, cls_src])])
+        edge_index_ext = torch.cat([edge_index_ext, cls_edges], dim=1)
+
+        # Contextualize all nodes; heat PE diffuses from CLS (index 0) as the root
+        z_out = self.graph_transformer(
+            z_all, edge_index_ext,
+            root_indices=[0],
+            heat_lam=None,   # extended graph not precomputed in dataset
+            heat_basis=None,
         )
 
-        # Read out from root curves; fall back to attention pooling if none are labeled
-        if root_indices:
-            z_tree = z_curves[root_indices].mean(dim=0)
-        else:
-            scores = torch.softmax(self.pool(z_curves), dim=0)
-            z_tree = (scores * z_curves).sum(dim=0)
+        # CLS token output is the global tree embedding; remaining nodes are per-curve
+        z_tree = z_out[0]
+        z_curves = z_out[1:]
         return z_tree, z_curves
 
     def forward(self, sample):
