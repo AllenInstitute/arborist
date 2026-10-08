@@ -61,6 +61,8 @@ class Arborist(nn.Module):
         graph_n_heads=4,
         graph_n_layers=3,
         graph_d_ff=128,
+        graph_n_pe_components=4,
+        graph_max_rel_dist=4,
         latent_dim=64,
         dropout=0.1,
     ):
@@ -74,6 +76,8 @@ class Arborist(nn.Module):
             "graph_n_heads": graph_n_heads,
             "graph_n_layers": graph_n_layers,
             "graph_d_ff": graph_d_ff,
+            "graph_n_pe_components": graph_n_pe_components,
+            "graph_max_rel_dist": graph_max_rel_dist,
             "latent_dim": latent_dim,
             "dropout": dropout,
         }
@@ -92,7 +96,11 @@ class Arborist(nn.Module):
             n_layers=graph_n_layers,
             d_ff=graph_d_ff,
             dropout=dropout,
+            n_pe_components=graph_n_pe_components,
+            max_rel_dist=graph_max_rel_dist,
         )
+        self.pool = nn.Linear(latent_dim, 1)
+        self.root_proj = nn.Linear(1, latent_dim, bias=False)
 
     def _collate_curves(self, curves):
         device = next(self.parameters()).device
@@ -131,16 +139,32 @@ class Arborist(nn.Module):
             empty = torch.zeros(self.config["latent_dim"], device=device)
             return empty, empty.unsqueeze(0)
 
-        # Encode curves
+        # Embed each curve independently via the sequence transformer
         diffs, mask = self._collate_curves(sample.curves)
         z, _ = self.curve_encoder(diffs, mask)
 
-        # Encode graph
-        edge_index = torch.as_tensor(
-            sample.edge_index, dtype=torch.long, device=device
+        # Inject binary root flag so root-adjacent curves are distinguishable before attention
+        root_indices = sample.root_curve_indices
+        if root_indices:
+            is_root = torch.zeros(len(sample.curves), 1, device=device)
+            is_root[root_indices] = 1.0
+            z = z + self.root_proj(is_root)
+
+        # Contextualize curves over the skeleton topology with heat-diffusion PE
+        edge_index = torch.as_tensor(sample.edge_index, dtype=torch.long, device=device)
+        z_curves = self.graph_transformer(
+            z, edge_index,
+            root_indices=root_indices,
+            heat_lam=getattr(sample, "heat_lam", None),
+            heat_basis=getattr(sample, "heat_basis", None),
         )
-        z_curves = self.graph_transformer(z, edge_index)
-        z_tree = z_curves.mean(dim=0)
+
+        # Read out from root curves; fall back to attention pooling if none are labeled
+        if root_indices:
+            z_tree = z_curves[root_indices].mean(dim=0)
+        else:
+            scores = torch.softmax(self.pool(z_curves), dim=0)
+            z_tree = (scores * z_curves).sum(dim=0)
         return z_tree, z_curves
 
     def forward(self, sample):

@@ -153,9 +153,27 @@ class GraphDataset(Dataset):
             xyz[1:] -= xyz[:-1].copy()
             curves.append(xyz)
 
-        # Create TreeSample
+        # Line-graph connectivity between curves
         edge_index = _build_line_graph_edge_index(topo_edge_index)
-        return TreeSample(curves=curves, edge_index=edge_index)
+
+        # Root-relative structural features: which curves touch the root, heat basis, root flag
+        n = len(curves)
+        root_curve_indices = [
+            k for k, (u, v) in enumerate(topo_edge_index) if 0 in (u, v)
+        ]
+        heat_lam, heat_basis = _compute_heat_basis(n, edge_index, root_curve_indices)
+        is_root = np.zeros(n, dtype=np.float32)
+        if root_curve_indices:
+            is_root[root_curve_indices] = 1.0
+
+        return TreeSample(
+            curves=curves,
+            edge_index=edge_index,
+            root_curve_indices=root_curve_indices,
+            heat_lam=heat_lam,
+            heat_basis=heat_basis,
+            is_root=is_root,
+        )
 
     def __len__(self):
         return len(self.root_nodes)
@@ -187,12 +205,33 @@ class TreeSample:
         edge when they meet at a topological node (branch point or leaf),
         so message passing over this graph communicates between neighboring
         branches.
+    root_curve_indices : List[int] or None
+        Indices of curves adjacent to the root topological node.
+    heat_lam : numpy.ndarray or None
+        Shape (n,). Eigenvalues of the normalized line-graph Laplacian,
+        precomputed so the model only contracts with learned time scales.
+    heat_basis : numpy.ndarray or None
+        Shape (n, n). Pre-multiplied eigenbasis: basis[v, j] = phi_j(v) *
+        phi_j_root_mean, so H_t(root, v) = sum_j basis[v,j]*exp(-lam_j*t).
+    is_root : numpy.ndarray or None
+        Shape (n,) float32. 1.0 for root-adjacent curves, 0.0 otherwise.
     """
 
-    def __init__(self, curves, edge_index, root_curve_indices=None):
+    def __init__(
+        self,
+        curves,
+        edge_index,
+        root_curve_indices=None,
+        heat_lam=None,
+        heat_basis=None,
+        is_root=None,
+    ):
         self.curves = curves
         self.edge_index = edge_index
         self.root_curve_indices = root_curve_indices
+        self.heat_lam = heat_lam
+        self.heat_basis = heat_basis
+        self.is_root = is_root
 
     def __repr__(self):
         return (
@@ -200,6 +239,37 @@ class TreeSample:
             f"n_curves={len(self.curves)}, "
             f"n_edges={self.edge_index.shape[1]})"
         )
+
+
+def _compute_heat_basis(n, edge_index, root_indices):
+    """
+    Precompute the normalized Laplacian eigenbasis projected onto the root.
+
+    Returns lam (n,) and basis (n, n) where basis[v, j] = phi_j(v) *
+    phi_j_root_mean, so the model only needs to contract with learned time
+    scales: H_t(root, v) = sum_j basis[v, j] * exp(-lam_j * t).
+    """
+    if n <= 1:
+        return np.zeros(n, dtype=np.float32), np.zeros((n, n), dtype=np.float32)
+
+    # Normalized Laplacian of the line graph
+    adj = np.zeros((n, n), dtype=np.float64)
+    if edge_index.shape[1] > 0:
+        adj[edge_index[0], edge_index[1]] = 1.0
+    deg = adj.sum(axis=1).clip(min=1e-8)
+    d_inv_sqrt = deg ** -0.5
+    L = np.eye(n) - d_inv_sqrt[:, None] * adj * d_inv_sqrt[None, :]
+
+    # Eigendecomposition — sorted ascending by eigenvalue
+    try:
+        eigvals, eigvecs = np.linalg.eigh(L)
+    except Exception:
+        return np.zeros(n, dtype=np.float32), np.zeros((n, n), dtype=np.float32)
+
+    # Project eigenvectors onto root so basis[v,j] = phi_j(v) * phi_j(root)
+    root_proj = eigvecs[root_indices].mean(axis=0) if root_indices else eigvecs[0]
+    basis = eigvecs * root_proj[None, :]
+    return eigvals.astype(np.float32), basis.astype(np.float32)
 
 
 def _build_line_graph_edge_index(topo_edge_index):
