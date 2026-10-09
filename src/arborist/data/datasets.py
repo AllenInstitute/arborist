@@ -498,7 +498,14 @@ class DatasetCollection(Dataset):
         for i in idxs:
             ds_idx = self.index["ds_idx"][i]
             item_idx = self.index["item_idx"][i]
-            examples.append(self.datasets[ds_idx][item_idx])
+            ds = self.datasets[ds_idx]
+            # Suppress augmentation so val items are fixed and unaugmented
+            orig = ds.__dict__.get("graph_transform")
+            if orig is not None:
+                ds.__dict__["graph_transform"] = None
+            examples.append(ds[item_idx])
+            if orig is not None:
+                ds.__dict__["graph_transform"] = orig
         return examples
 
     def __getitem__(self, i):
@@ -606,12 +613,12 @@ def build_dataloader(
     use_sampler=True,
 ):
     """
-    Builds a DataLoader for a PathsDatasetCollection that samples with respect
+    Builds a DataLoader for a DatasetCollection that samples with respect
     to curve length.
 
     Parameters
     ----------
-    dataset : PathsDatasetCollection
+    dataset : DatasetCollection
         Dataset to input to dataloader.
     batch_size : int, optional
         Number of curves per batch. Default is 32.
