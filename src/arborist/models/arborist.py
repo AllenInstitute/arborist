@@ -9,6 +9,7 @@ End-to-end ArboristModel for neuron morphology encoding.
 """
 
 import json
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -21,10 +22,12 @@ class Arborist(nn.Module):
     End-to-end neuron morphology encoder.
 
     Encodes a TreeSample in three stages:
-      1. CurveEncoder   — each irreducible path → latent vector z_i
+      1. CurveEncoder   — each irreducible path → latent vector z_i (shape
+                          only; translation-invariant), plus a projection of
+                          the curve's placement in the tree frame
       2. GraphTransformer — message-pass over the line graph of the skeleton
                            so each curve sees its neighboring branches
-      3. Readout      — average over all curve embeddings → global tree z
+      3. Readout      — CLS token output → global tree z
 
     Parameters
     ----------
@@ -49,6 +52,13 @@ class Arborist(nn.Module):
         Default is 64.
     dropout : float, optional
         Dropout probability shared across both sub-models. Default is 0.1.
+    geom_scale : float, optional
+        Reference length r0 (microns) for log-radial compression of the
+        per-curve placement features. Endpoint positions keep their direction
+        while the radius becomes log1p(r / r0); cable length becomes
+        log1p(L / r0). Resolution is near-linear below r0 and logarithmic
+        above, so bounded subgraphs and whole-brain arbors share one
+        order-one feature range. Default is 10.0.
     """
 
     def __init__(
@@ -65,6 +75,7 @@ class Arborist(nn.Module):
         graph_max_rel_dist=4,
         latent_dim=64,
         dropout=0.1,
+        geom_scale=10.0,
     ):
         super().__init__()
         self.config = {
@@ -80,6 +91,7 @@ class Arborist(nn.Module):
             "graph_max_rel_dist": graph_max_rel_dist,
             "latent_dim": latent_dim,
             "dropout": dropout,
+            "geom_scale": geom_scale,
         }
         self.curve_encoder = CurveEncoder(
             segment_len=curve_segment_len,
@@ -100,7 +112,22 @@ class Arborist(nn.Module):
             max_rel_dist=graph_max_rel_dist,
         )
         self.cls_token = nn.Parameter(torch.zeros(latent_dim))
-        self.root_proj = nn.Linear(1, latent_dim, bias=False)
+
+        # Curve placement in the tree frame (proximal xyz, distal xyz, length)
+        self.geom_scale = geom_scale
+        self.geom_proj = nn.Sequential(
+            nn.Linear(7, latent_dim),
+            nn.GELU(),
+            nn.Linear(latent_dim, latent_dim),
+        )
+
+    def _compress_geom(self, geom):
+        """Log-radial compression of (n, 7) placement features; see geom_scale."""
+        pos = geom[:, :6].reshape(-1, 2, 3)
+        r = pos.norm(dim=-1, keepdim=True)
+        pos = pos * torch.log1p(r / self.geom_scale) / r.clamp(min=1e-6)
+        length = torch.log1p(geom[:, 6:] / self.geom_scale)
+        return torch.cat([pos.reshape(-1, 6), length], dim=1)
 
     def _collate_curves(self, curves):
         device = next(self.parameters()).device
@@ -143,12 +170,12 @@ class Arborist(nn.Module):
         diffs, mask = self._collate_curves(sample.curves)
         z, _ = self.curve_encoder(diffs, mask)
 
-        # Inject binary root flag so root-adjacent curves are distinguishable before attention
+        # Add each curve's placement in the shared tree frame; the curve
+        # encoder itself is translation-invariant and only sees shape
+        geom = torch.as_tensor(sample.curve_geom, dtype=torch.float32, device=device)
+        z = z + self.geom_proj(self._compress_geom(geom))
+
         root_indices = sample.root_curve_indices
-        if root_indices:
-            is_root = torch.zeros(len(sample.curves), 1, device=device)
-            is_root[root_indices] = 1.0
-            z = z + self.root_proj(is_root)
 
         # Prepend CLS token; shift curve edge_index by 1 to make room
         edge_index = torch.as_tensor(sample.edge_index, dtype=torch.long, device=device)
@@ -195,12 +222,16 @@ class Arborist(nn.Module):
         else:
             hop_ext = None
 
-        # Contextualize all nodes; heat PE diffuses from CLS (index 0) as the root
+        # CLS sits at the topological root (node 0); curves read heat at their endpoints
+        node_endpoints = np.concatenate(
+            [np.zeros((1, 2), dtype=np.int64), np.asarray(sample.curve_endpoints, dtype=np.int64)]
+        )
+
         z_out = self.graph_transformer(
             z_all, edge_index_ext,
-            root_indices=[0],
-            heat_lam=None,
-            heat_basis=None,
+            heat_lam=sample.heat_lam,
+            heat_basis=sample.heat_basis,
+            node_endpoints=node_endpoints,
             edge_type=edge_type_ext,
             hop_dist=hop_ext,
         )

@@ -6,14 +6,15 @@ Created on Mon Aug 6 17:00:00 2026
 
 Graph transformer for contextualizing curve embeddings over skeleton topology.
 
-Two structural signals are computed from the line-graph edge_index and
-injected before/during attention:
+Two structural signals are injected before/during attention:
 
-  1. Global PE  — heat diffusion PE from the graph root (see below).
-  2. Relative PE — learnable per-head bias indexed by clamped hop distance
-                   (0=self, 1..max_rel_dist=hop count, max_rel_dist+1=far).
-                   Unreachable pairs (disconnected components) receive -inf.
-                   The old bool attention mask is subsumed by this float bias.
+  1. Global PE  — heat diffusion PE from the root over the topological graph
+                  (see below).
+  2. Relative PE — learnable per-head bias indexed by clamped line-graph hop
+                   distance (0=self, 1..max_rel_dist=hop count,
+                   max_rel_dist+1=far). Unreachable pairs (disconnected
+                   components) receive -inf. The old bool attention mask is
+                   subsumed by this float bias.
 
 
 Heat Diffusion Global Positional Encoding
@@ -23,15 +24,19 @@ significant node (e.g. a branch point or endpoint of interest). Because the
 model's decision is inherently relative to that root, curves should be
 characterized by their position within the tree with respect to it — not in
 isolation. Heat diffusion PE captures this by propagating a unit impulse from
-the root and reading out how much heat reaches each curve v at k time scales:
+the root over the topological graph (nodes = root, branch points, leaves;
+edges = curves) and reading out how much heat reaches each topological node v
+at k time scales:
 
     H_t(root, v) = Σⱼ exp(−λⱼ · t) · φⱼ(root) · φⱼ(v)
 
 where λⱼ and φⱼ are the eigenvalues and eigenvectors of the normalized graph
-Laplacian. This gives each curve a k-dimensional encoding of its proximity to
-the root across spatial scales:
+Laplacian. Heat is normalized so the root reads 1 at every scale, making the
+encoding comparable across trees of different size. Each curve then reads the
+heat at its proximal and distal endpoints, giving a 2k-dimensional encoding of
+both its depth and its orientation relative to the root:
 
-  - Small t: only immediately adjacent curves are warm — encodes local
+  - Small t: only nodes adjacent to the root are warm — encodes local
     proximity to the root (1–2 hops).
   - Large t: heat has diffused across the tree — encodes broad distance
     and whether a node is in the same connected component as the root.
@@ -39,7 +44,9 @@ the root across spatial scales:
 The k time scales are initialized log-spaced at [1, 2, 4, ..., 2^(k-1)] and
 parameterized in log-space (t = exp(log_t)) so they remain positive and are
 learned end-to-end, allowing the model to discover which diffusion scales are
-most informative for the task.
+most informative for the task. The eigendecomposition is done once per sample
+in the dataset worker; the model only contracts the basis with the learned
+time scales.
 
 """
 
@@ -72,11 +79,12 @@ class GraphTransformer(nn.Module):
         self.n_heads = n_heads
 
         # Global PE: k learnable diffusion times (log-space for positivity),
-        # initialized at [1, 2, 4, ..., 2^(k-1)], then projected to latent_dim
+        # initialized at [1, 2, 4, ..., 2^(k-1)]; heat at a curve's two
+        # endpoints (2k values) is projected to latent_dim
         self.log_times = nn.Parameter(
             math.log(2) * torch.arange(n_pe_components, dtype=torch.float32)
         )
-        self.pe_proj = nn.Linear(n_pe_components, latent_dim)
+        self.pe_proj = nn.Linear(2 * n_pe_components, latent_dim)
 
         # Relative PE: one learned scalar bias per head per distance bucket
         # Buckets: 0=self, 1..max_rel_dist=hop count, max_rel_dist+1=far/unreachable
@@ -93,48 +101,29 @@ class GraphTransformer(nn.Module):
         self.norm = nn.LayerNorm(latent_dim)
 
     # --- Positional encoding helpers ---
-    def _heat_diffusion_pe(self, n, edge_index, root_indices, device, heat_lam=None, heat_basis=None):
+    def _heat_diffusion_pe(self, heat_lam, heat_basis, node_endpoints, device):
         """
-        Heat kernel from root at k log-spaced time scales.
+        Heat kernel from the root over the topological graph at k learned
+        time scales, read out at each node's (proximal, distal) endpoints.
 
-        Uses precomputed (heat_lam, heat_basis) when available — eigendecomposition
-        runs once in the dataset worker, not per forward pass. Falls back to
-        on-the-fly computation when those are None.
+        Parameters
+        ----------
+        heat_lam : array-like, shape (n_topo,)
+        heat_basis : array-like, shape (n_topo, n_topo)
+        node_endpoints : array-like, shape (n, 2)
+            Topological node indices per attention node. The CLS node uses
+            (root, root).
 
-        Returns (n, k).
+        Returns (n, 2k).
         """
-        k = self.n_pe_components
-        if n <= 1:
-            return torch.zeros(n, k, device=device)
+        lam = torch.as_tensor(heat_lam, dtype=torch.float32, device=device)
+        basis = torch.as_tensor(heat_basis, dtype=torch.float32, device=device)
+        ends = torch.as_tensor(node_endpoints, dtype=torch.long, device=device)
 
-        if heat_lam is not None and heat_basis is not None:
-            # Use basis precomputed in the dataset worker
-            lam = torch.as_tensor(heat_lam, dtype=torch.float32, device=device)    # (n,)
-            basis = torch.as_tensor(heat_basis, dtype=torch.float32, device=device) # (n, n)
-        else:
-            # Build normalized Laplacian and decompose on the fly
-            adj = torch.zeros(n, n, device=device)
-            if edge_index.shape[1] > 0:
-                adj[edge_index[0], edge_index[1]] = 1.0
-            deg = adj.sum(dim=1).clamp(min=1e-8)
-            d_inv_sqrt = deg.pow(-0.5)
-            L = torch.eye(n, device=device) - d_inv_sqrt[:, None] * adj * d_inv_sqrt[None, :]
-            try:
-                lam, eigvecs = torch.linalg.eigh(L)
-            except Exception:
-                return torch.zeros(n, k, device=device)
-            # Project eigenvectors onto root to form the pre-multiplied basis
-            if root_indices:
-                idx = torch.tensor(root_indices, dtype=torch.long, device=device)
-                root_proj = eigvecs[idx].mean(dim=0)
-            else:
-                root_proj = eigvecs[0]
-            basis = eigvecs * root_proj[None, :]
-
-        # Contract basis with k learned diffusion time scales → per-curve PE
-        times = self.log_times.exp().to(device)                          # (k,)
-        exp_weights = torch.exp(-lam[:, None] * times[None, :])          # (n, k)
-        return basis @ exp_weights                                        # (n, k)
+        times = self.log_times.exp()                                      # (k,)
+        heat = basis @ torch.exp(-lam[:, None] * times[None, :])          # (n_topo, k)
+        heat = heat / heat[0:1].clamp(min=1e-8)                          # root ≡ 1 per scale
+        return heat[ends].reshape(ends.shape[0], -1)                      # (n, 2k)
 
     def _hop_dist_matrix(self, n, edge_index):
         """BFS fallback — returns int8 ndarray. Only used when hop_dist not precomputed."""
@@ -176,7 +165,7 @@ class GraphTransformer(nn.Module):
         return bias
 
     # --- Forward ---
-    def forward(self, x, edge_index, root_indices=None, heat_lam=None, heat_basis=None, edge_type=None, hop_dist=None):
+    def forward(self, x, edge_index, heat_lam, heat_basis, node_endpoints, edge_type=None, hop_dist=None):
         """
         Parameters
         ----------
@@ -184,13 +173,18 @@ class GraphTransformer(nn.Module):
             Shape (n, latent_dim).
         edge_index : torch.Tensor
             Shape (2, E), dtype long — bidirectional line-graph adjacency.
-        root_indices : list[int] or None
-            Curve indices adjacent to the proposal endpoint. Used as the heat
-            diffusion source. Falls back to node 0 if None.
-        heat_lam : numpy.ndarray or None
-            Precomputed Laplacian eigenvalues (n,). Passed from TreeSample.
-        heat_basis : numpy.ndarray or None
-            Precomputed projected eigenbasis (n, n). Passed from TreeSample.
+        heat_lam : numpy.ndarray
+            Topological-graph Laplacian eigenvalues (n_topo,). From TreeSample.
+        heat_basis : numpy.ndarray
+            Root-projected eigenbasis (n_topo, n_topo). From TreeSample.
+        node_endpoints : numpy.ndarray or torch.Tensor
+            Shape (n, 2) — (proximal, distal) topological node index of each
+            attention node.
+        edge_type : array-like or None
+            Shape (E,) line-graph edge direction types, parallel to edge_index.
+        hop_dist : array-like or None
+            Shape (n, n) line-graph hop distances, -1 = unreachable. BFS
+            fallback if None.
 
         Returns
         -------
@@ -201,7 +195,7 @@ class GraphTransformer(nn.Module):
 
         # Add heat diffusion PE from the root before any attention
         x = x + self.pe_proj(
-            self._heat_diffusion_pe(n, edge_index, root_indices, device, heat_lam, heat_basis)
+            self._heat_diffusion_pe(heat_lam, heat_basis, node_endpoints, device)
         )
 
         # Build per-head float attention bias: hop distance + edge direction type

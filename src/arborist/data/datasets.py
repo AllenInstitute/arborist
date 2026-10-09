@@ -188,11 +188,23 @@ class TreeSample:
     root_curve_indices : List[int] or None
         Indices of curves adjacent to the root topological node.
     heat_lam : numpy.ndarray or None
-        Shape (n,). Eigenvalues of the normalized line-graph Laplacian,
-        precomputed so the model only contracts with learned time scales.
+        Shape (n_topo,). Eigenvalues of the normalized Laplacian of the
+        topological graph (root, branch points, leaves), precomputed so the
+        model only contracts with learned time scales.
     heat_basis : numpy.ndarray or None
-        Shape (n, n). Pre-multiplied eigenbasis: basis[v, j] = phi_j(v) *
-        phi_j_root_mean, so H_t(root, v) = sum_j basis[v,j]*exp(-lam_j*t).
+        Shape (n_topo, n_topo). Pre-multiplied eigenbasis: basis[v, j] =
+        phi_j(v) * phi_j(root), so H_t(root, v) = sum_j basis[v,j]*exp(-lam_j*t)
+        is the heat reaching topological node v from the root (topo node 0).
+    curve_endpoints : numpy.ndarray or None
+        Shape (n, 2) int64. (proximal, distal) topological node index of each
+        curve; proximal is the endpoint closer to the root. Used to read each
+        curve's heat PE off the topological graph.
+    curve_geom : numpy.ndarray or None
+        Shape (n, 7) float32. Placement of each curve in the shared subgraph
+        frame with the root at the origin: proximal endpoint xyz (3), distal
+        endpoint xyz (3), cable length (1). Reconstructed from the finite
+        differences by walking the tree from the root, so the Arborist encoder
+        can relate curves to each other and to the root.
     is_root : numpy.ndarray or None
         Shape (n,) float32. 1.0 for root-adjacent curves, 0.0 otherwise.
     edge_type : numpy.ndarray or None
@@ -215,6 +227,8 @@ class TreeSample:
         root_curve_indices=None,
         heat_lam=None,
         heat_basis=None,
+        curve_endpoints=None,
+        curve_geom=None,
         is_root=None,
         edge_type=None,
         hop_dist=None,
@@ -225,6 +239,8 @@ class TreeSample:
         self.root_curve_indices = root_curve_indices
         self.heat_lam = heat_lam
         self.heat_basis = heat_basis
+        self.curve_endpoints = curve_endpoints
+        self.curve_geom = curve_geom
         self.is_root = is_root
         self.edge_type = edge_type
         self.hop_dist = hop_dist
@@ -259,7 +275,8 @@ def _topo_depths(topo_edge_index):
 
 def _build_line_graph(topo_edge_index, topo_depths):
     """
-    Build the line-graph edge_index and a parallel edge_type array.
+    Build the line-graph edge_index, a parallel edge_type array, and the
+    (proximal, distal) topological endpoints of each curve.
 
     For each pair of curves (i, j) sharing a topological node t the edge
     type is determined by whether t is the proximal (root-side) or distal
@@ -298,9 +315,13 @@ def _build_line_graph(topo_edge_index, topo_depths):
                 else:
                     types.append(SIBLING)
 
+    n = len(topo_edge_index)
+    endpoints = np.array(
+        [[proximal[k], distal[k]] for k in range(n)], dtype=np.int64
+    ).reshape(n, 2)
     if not src:
-        return np.zeros((2, 0), dtype=np.int64), np.zeros(0, dtype=np.int64)
-    return np.array([src, dst], dtype=np.int64), np.array(types, dtype=np.int64)
+        return np.zeros((2, 0), dtype=np.int64), np.zeros(0, dtype=np.int64), endpoints
+    return np.array([src, dst], dtype=np.int64), np.array(types, dtype=np.int64), endpoints
 
 
 def build_tree_sample(curves, topo_edge_index, target=None):
@@ -328,10 +349,11 @@ def build_tree_sample(curves, topo_edge_index, target=None):
     TreeSample
     """
     topo_depths = _topo_depths(topo_edge_index)
-    edge_index, edge_type = _build_line_graph(topo_edge_index, topo_depths)
+    edge_index, edge_type, curve_endpoints = _build_line_graph(topo_edge_index, topo_depths)
     n = len(curves)
     root_curve_indices = [k for k, (u, v) in enumerate(topo_edge_index) if 0 in (u, v)]
-    heat_lam, heat_basis = _compute_heat_basis(n, edge_index, root_curve_indices)
+    heat_lam, heat_basis = _compute_heat_basis(topo_edge_index)
+    curve_geom = _compute_curve_geom(curves, curve_endpoints, len(heat_lam))
     hop_dist = _compute_hop_dist(n, edge_index)
     is_root = np.zeros(n, dtype=np.float32)
     if root_curve_indices:
@@ -342,6 +364,8 @@ def build_tree_sample(curves, topo_edge_index, target=None):
         root_curve_indices=root_curve_indices,
         heat_lam=heat_lam,
         heat_basis=heat_basis,
+        curve_endpoints=curve_endpoints,
+        curve_geom=curve_geom,
         is_root=is_root,
         edge_type=edge_type,
         hop_dist=hop_dist,
@@ -372,34 +396,68 @@ def _compute_hop_dist(n, edge_index):
     return dist
 
 
-def _compute_heat_basis(n, edge_index, root_indices):
+def _compute_curve_geom(curves, curve_endpoints, n_topo, root=0):
     """
-    Precompute the normalized Laplacian eigenbasis projected onto the root.
+    Place each curve in the shared subgraph frame (root at origin).
 
-    Returns lam (n,) and basis (n, n) where basis[v, j] = phi_j(v) *
-    phi_j_root_mean, so the model only needs to contract with learned time
-    scales: H_t(root, v) = sum_j basis[v, j] * exp(-lam_j * t).
+    Topological node positions are recovered by walking the tree from the
+    root: a curve's distal endpoint is its proximal endpoint plus the sum of
+    its step vectors. Returns (n, 7) float32: proximal xyz, distal xyz, length.
     """
+    n = len(curves)
+    pos = np.zeros((n_topo, 3), dtype=np.float64)
+    known = np.zeros(n_topo, dtype=bool)
+    known[root] = True
+    displacement = np.stack([np.asarray(c, dtype=np.float64).sum(axis=0) for c in curves]) if n else np.zeros((0, 3))
+    pending = list(range(n))
+    while pending:
+        remaining = []
+        for k in pending:
+            p, d = curve_endpoints[k]
+            if known[p]:
+                pos[d] = pos[p] + displacement[k]
+                known[d] = True
+            else:
+                remaining.append(k)
+        if len(remaining) == len(pending):
+            break
+        pending = remaining
+
+    length = np.array(
+        [np.linalg.norm(np.asarray(c, dtype=np.float64), axis=1).sum() for c in curves]
+    ).reshape(n, 1)
+    geom = np.concatenate(
+        [pos[curve_endpoints[:, 0]], pos[curve_endpoints[:, 1]], length], axis=1
+    ) if n else np.zeros((0, 7))
+    return geom.astype(np.float32)
+
+
+def _compute_heat_basis(topo_edge_index, root=0):
+    """
+    Precompute the normalized Laplacian eigenbasis of the topological graph,
+    projected onto the root node.
+
+    Returns lam (n_topo,) and basis (n_topo, n_topo) where basis[v, j] =
+    phi_j(v) * phi_j(root), so the model only needs to contract with learned
+    time scales: H_t(root, v) = sum_j basis[v, j] * exp(-lam_j * t).
+    """
+    n = 1 + max((max(u, v) for u, v in topo_edge_index), default=root)
     if n <= 1:
         return np.zeros(n, dtype=np.float32), np.zeros((n, n), dtype=np.float32)
 
-    # Normalized Laplacian of the line graph
     adj = np.zeros((n, n), dtype=np.float64)
-    if edge_index.shape[1] > 0:
-        adj[edge_index[0], edge_index[1]] = 1.0
+    for u, v in topo_edge_index:
+        adj[u, v] = adj[v, u] = 1.0
     deg = adj.sum(axis=1).clip(min=1e-8)
     d_inv_sqrt = deg ** -0.5
     L = np.eye(n) - d_inv_sqrt[:, None] * adj * d_inv_sqrt[None, :]
 
-    # Eigendecomposition — sorted ascending by eigenvalue
     try:
         eigvals, eigvecs = np.linalg.eigh(L)
     except Exception:
         return np.zeros(n, dtype=np.float32), np.zeros((n, n), dtype=np.float32)
 
-    # Project eigenvectors onto root so basis[v,j] = phi_j(v) * phi_j(root)
-    root_proj = eigvecs[root_indices].mean(axis=0) if root_indices else eigvecs[0]
-    basis = eigvecs * root_proj[None, :]
+    basis = eigvecs * eigvecs[root][None, :]
     return eigvals.astype(np.float32), basis.astype(np.float32)
 
 
