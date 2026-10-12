@@ -424,6 +424,21 @@ class SkeletonGraph(rx.PyGraph):
         """
         return [i for i in self.node_indices() if self.degree(i) > 2]
 
+    def edge_lengths(self):
+        """
+        Returns all edges and their Euclidean lengths.
+
+        Returns
+        -------
+        edges : numpy.ndarray
+            Array of shape (n_edges, 2) containing node ID pairs.
+        lengths : numpy.ndarray
+            Length of each edge.
+        """
+        edges = np.array(self.edge_list(), dtype=np.int64).reshape(-1, 2)
+        diffs = self.node_xyz[edges[:, 0]] - self.node_xyz[edges[:, 1]]
+        return edges, np.linalg.norm(diffs, axis=1)
+
     def node_cable_lengths(self):
         """
         Returns a dict mapping each node ID to the cable length of its
