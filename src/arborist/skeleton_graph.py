@@ -12,6 +12,7 @@ that represents a tree-structured graph with 3D spatial geometry.
 from collections import defaultdict
 from concurrent.futures import as_completed, ThreadPoolExecutor
 from io import StringIO
+from itertools import repeat
 from scipy.spatial import KDTree
 from tqdm import tqdm
 
@@ -322,8 +323,10 @@ class SkeletonGraph(rx.PyGraph):
         """
         self.check_swc_ids()
         with zf.ZipFile(zip_path, "w") as zipfile:
-            for nodes in map(list, rx.connected_components(self)):
-                self.component_to_zipped_swc(zipfile, nodes[0], use_radius)
+            for root, edges in self._dfs_edges_by_root().items():
+                self.component_to_zipped_swc(
+                    zipfile, root, use_radius, edges=edges
+                )
 
     def to_zipped_swcs_multithreaded(self, output_dir, use_radius=True):
         """
@@ -337,12 +340,11 @@ class SkeletonGraph(rx.PyGraph):
             Indication of whether to use node radius or default 2μm. Default
             is True.
         """
-        components = rx.connected_components(self)
-        n = len(components)
+        edges_by_root = self._dfs_edges_by_root()
+        roots = [[root] for root in edges_by_root]
+        edges_list = list(edges_by_root.values())
+        n = len(roots)
         batch_size = max(1, n // 1000 if n > 10**4 else n)
-        batches = [
-            components[i: i + batch_size] for i in range(0, n, batch_size)
-        ]
 
         os.makedirs(output_dir, exist_ok=True)
         self.check_swc_ids()
@@ -350,23 +352,58 @@ class SkeletonGraph(rx.PyGraph):
             threads = [
                 executor.submit(
                     self._batch_to_zipped_swcs,
-                    batch,
+                    roots[i: i + batch_size],
                     os.path.join(output_dir, f"{k}.zip"),
                     use_radius,
+                    edges_list[i: i + batch_size],
                 )
-                for k, batch in enumerate(batches)
+                for k, i in enumerate(range(0, n, batch_size))
             ]
             pbar = tqdm(total=len(threads), desc="Write SWCs")
             for thread in as_completed(threads):
                 thread.result()
                 pbar.update(1)
 
-    def _batch_to_zipped_swcs(self, nodes_list, zip_path, use_radius):
+    def _batch_to_zipped_swcs(
+        self, nodes_list, zip_path, use_radius, edges_list=None
+    ):
+        if edges_list is None:
+            edges_list = repeat(None)
         with zf.ZipFile(zip_path, "w") as zipfile:
-            for nodes in map(list, nodes_list):
-                self.component_to_zipped_swc(zipfile, nodes[0], use_radius)
+            for nodes, edges in zip(map(list, nodes_list), edges_list):
+                self.component_to_zipped_swc(
+                    zipfile, nodes[0], use_radius, edges=edges
+                )
 
-    def component_to_zipped_swc(self, zipfile, root, use_radius=False):
+    def _dfs_edges_by_root(self):
+        """
+        Computes a DFS tree for every connected component in a single pass.
+
+        Returns
+        -------
+        Dict[int, List[Tuple[int]]]
+            Mapping from each component's root node to its DFS tree edges.
+        """
+        # One whole-graph traversal: rx.dfs_edges(self, source=root) costs
+        # O(graph size) per call, so calling it per component is quadratic.
+        visited = np.zeros(max(self.node_indices(), default=-1) + 1, bool)
+        edges_by_root = dict()
+        for i, j in rx.dfs_edges(self):
+            if not visited[i]:
+                visited[i] = True
+                root_edges = edges_by_root[i] = list()
+            visited[j] = True
+            root_edges.append((i, j))
+
+        # Isolated nodes have no edges
+        for i in self.node_indices():
+            if not visited[i]:
+                edges_by_root[i] = list()
+        return edges_by_root
+
+    def component_to_zipped_swc(
+        self, zipfile, root, use_radius=False, edges=None
+    ):
         """
         Writes the connected component containing the given root node to a
         zipped SWC file.
@@ -380,6 +417,9 @@ class SkeletonGraph(rx.PyGraph):
         use_radius : bool, optional
             Indication of whether to preserve radii or use default 2μm.
             Default is False.
+        edges : List[Tuple[int]], optional
+            Precomputed DFS tree edges of the component rooted at "root".
+            Default is None, in which case they are computed here.
 
         Notes
         -----
@@ -404,7 +444,9 @@ class SkeletonGraph(rx.PyGraph):
             cnt = 1
             node_to_idx = defaultdict(lambda: -1)
             write_entry(root, -1)
-            for i, j in rx.dfs_edges(self, source=root):
+            if edges is None:
+                edges = rx.dfs_edges(self, source=root)
+            for i, j in edges:
                 cnt += 1
                 write_entry(j, i)
 
