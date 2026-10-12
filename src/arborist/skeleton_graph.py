@@ -466,10 +466,26 @@ class SkeletonGraph(rx.PyGraph):
             Cable length.
         """
         cable_length = 0
-        for i, j in rx.dfs_edges(self, source=root):
-            cable_length += self.dist(i, j)
-            if cable_length > max_depth:
-                break
+        if root is None:
+            for i, j in rx.dfs_edges(self):
+                cable_length += self.dist(i, j)
+                if cable_length > max_depth:
+                    break
+            return cable_length
+
+        # rx.dfs_edges(self, source=root) costs O(graph size) per call, which
+        # is quadratic when called per component, so walk only the component.
+        visited = {root}
+        stack = [root]
+        while stack:
+            i = stack.pop()
+            for j in self.neighbors(i):
+                if j not in visited:
+                    visited.add(j)
+                    stack.append(j)
+                    cable_length += self.dist(i, j)
+                    if cable_length > max_depth:
+                        return cable_length
         return cable_length
 
     def edge_lengths(self):
