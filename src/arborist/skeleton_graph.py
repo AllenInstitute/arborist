@@ -412,7 +412,7 @@ class SkeletonGraph(rx.PyGraph):
             swc_id = self.node_swc_id(root)
             name = f"{swc_id}.swc"
             suffix = 0
-            while name in zipfile.namelist():
+            while name in zipfile.NameToInfo:
                 name = f"{swc_id}.{suffix}.swc"
                 suffix += 1
             zipfile.writestr(name, text_buffer.getvalue())
