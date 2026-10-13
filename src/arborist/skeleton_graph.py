@@ -9,10 +9,7 @@ that represents a tree-structured graph with 3D spatial geometry.
 
 """
 
-from collections import defaultdict
 from concurrent.futures import as_completed, ThreadPoolExecutor
-from io import StringIO
-from itertools import repeat
 from scipy.spatial import KDTree
 from tqdm import tqdm
 
@@ -110,7 +107,7 @@ class SkeletonGraph(rx.PyGraph):
         self.node_xyz = np.zeros((num_nodes, 3), dtype=np.float32)
         self.node_feats = {
             "radius": np.zeros((num_nodes,), dtype=np.float16),
-            "type": np.zeros((num_nodes,), dtype=np.uint8),
+            "type": np.zeros((num_nodes,), dtype=np.int8),
         }
 
         # Add connected components to graph
@@ -272,8 +269,8 @@ class SkeletonGraph(rx.PyGraph):
 
     def remove_small_components(self, min_size=20, relabel_nodes=True):
         rm_nodes = list()
-        for nodes in map(list, rx.connected_components(self)):
-            length = self.cable_length(max_depth=min_size, root=nodes[0])
+        components, lengths = self.component_cable_lengths()
+        for nodes, length in zip(components, lengths):
             if length < min_size:
                 rm_nodes.extend(nodes)
         self.remove_nodes_from(rm_nodes)
@@ -323,10 +320,8 @@ class SkeletonGraph(rx.PyGraph):
         """
         self.check_swc_ids()
         with zf.ZipFile(zip_path, "w") as zipfile:
-            for root, edges in self._dfs_edges_by_root().items():
-                self.component_to_zipped_swc(
-                    zipfile, root, use_radius, edges=edges
-                )
+            for nodes in map(list, rx.connected_components(self)):
+                self.component_to_zipped_swc(zipfile, nodes[0], use_radius)
 
     def to_zipped_swcs_multithreaded(self, output_dir, use_radius=True):
         """
@@ -340,11 +335,12 @@ class SkeletonGraph(rx.PyGraph):
             Indication of whether to use node radius or default 2μm. Default
             is True.
         """
-        edges_by_root = self._dfs_edges_by_root()
-        roots = [[root] for root in edges_by_root]
-        edges_list = list(edges_by_root.values())
-        n = len(roots)
+        components = rx.connected_components(self)
+        n = len(components)
         batch_size = max(1, n // 1000 if n > 10**4 else n)
+        batches = [
+            components[i: i + batch_size] for i in range(0, n, batch_size)
+        ]
 
         os.makedirs(output_dir, exist_ok=True)
         self.check_swc_ids()
@@ -352,58 +348,23 @@ class SkeletonGraph(rx.PyGraph):
             threads = [
                 executor.submit(
                     self._batch_to_zipped_swcs,
-                    roots[i: i + batch_size],
+                    batch,
                     os.path.join(output_dir, f"{k}.zip"),
                     use_radius,
-                    edges_list[i: i + batch_size],
                 )
-                for k, i in enumerate(range(0, n, batch_size))
+                for k, batch in enumerate(batches)
             ]
             pbar = tqdm(total=len(threads), desc="Write SWCs")
             for thread in as_completed(threads):
                 thread.result()
                 pbar.update(1)
 
-    def _batch_to_zipped_swcs(
-        self, nodes_list, zip_path, use_radius, edges_list=None
-    ):
-        if edges_list is None:
-            edges_list = repeat(None)
+    def _batch_to_zipped_swcs(self, nodes_list, zip_path, use_radius):
         with zf.ZipFile(zip_path, "w") as zipfile:
-            for nodes, edges in zip(map(list, nodes_list), edges_list):
-                self.component_to_zipped_swc(
-                    zipfile, nodes[0], use_radius, edges=edges
-                )
+            for nodes in map(list, nodes_list):
+                self.component_to_zipped_swc(zipfile, nodes[0], use_radius)
 
-    def _dfs_edges_by_root(self):
-        """
-        Computes a DFS tree for every connected component in a single pass.
-
-        Returns
-        -------
-        Dict[int, List[Tuple[int]]]
-            Mapping from each component's root node to its DFS tree edges.
-        """
-        # One whole-graph traversal: rx.dfs_edges(self, source=root) costs
-        # O(graph size) per call, so calling it per component is quadratic.
-        visited = np.zeros(max(self.node_indices(), default=-1) + 1, bool)
-        edges_by_root = dict()
-        for i, j in rx.dfs_edges(self):
-            if not visited[i]:
-                visited[i] = True
-                root_edges = edges_by_root[i] = list()
-            visited[j] = True
-            root_edges.append((i, j))
-
-        # Isolated nodes have no edges
-        for i in self.node_indices():
-            if not visited[i]:
-                edges_by_root[i] = list()
-        return edges_by_root
-
-    def component_to_zipped_swc(
-        self, zipfile, root, use_radius=False, edges=None
-    ):
+    def component_to_zipped_swc(self, zipfile, root, use_radius=False):
         """
         Writes the connected component containing the given root node to a
         zipped SWC file.
@@ -417,9 +378,6 @@ class SkeletonGraph(rx.PyGraph):
         use_radius : bool, optional
             Indication of whether to preserve radii or use default 2μm.
             Default is False.
-        edges : List[Tuple[int]], optional
-            Precomputed DFS tree edges of the component rooted at "root".
-            Default is None, in which case they are computed here.
 
         Notes
         -----
@@ -427,37 +385,62 @@ class SkeletonGraph(rx.PyGraph):
         it survives a load/write round-trip. Graphs built without that feature
         fall back to 2 (axon), which is what this writer always emitted before.
         """
-        def write_entry(node, parent):
-            x, y, z = self.node_xyz[node]
-            r = self.node_feats["radius"][node] if use_radius else 2
-            t = (
-                self.node_feats["type"][node]
-                if "type" in self.node_feats else 2
-            )
-            node_to_idx[node] = cnt
-            text_buffer.write(
-                f"\n{cnt} {t} {x} {y} {z} {r} {node_to_idx[parent]}"
-            )
+        # Step 1: DFS over the component in Python. rx.dfs_edges allocates
+        # a visited array over the whole graph on every call (7 ms at 13M
+        # nodes), so a per-component call made a full write of ~500k
+        # components take about an hour. Walking self.neighbors touches
+        # only the component. Each node's SWC id is its 1-based discovery
+        # index; its parent is the node it was discovered from.
+        nodes = [root]
+        parents = [-1]
+        swc_ids = {root: 1}
+        stack = [root]
+        while stack:
+            i = stack.pop()
+            for j in self.neighbors(i):
+                if j not in swc_ids:
+                    swc_ids[j] = len(nodes) + 1
+                    nodes.append(j)
+                    parents.append(swc_ids[i])
+                    stack.append(j)
+        n = len(nodes)
+        nodes = np.asarray(nodes, dtype=np.int64)
+        parents = np.asarray(parents, dtype=np.int64)
 
-        with StringIO() as text_buffer:
-            text_buffer.write("# id, type, z, y, x, r, pid")
-            cnt = 1
-            node_to_idx = defaultdict(lambda: -1)
-            write_entry(root, -1)
-            if edges is None:
-                edges = rx.dfs_edges(self, source=root)
-            for i, j in edges:
-                cnt += 1
-                write_entry(j, i)
+        # Step 2: gather column data with vectorized indexing and convert to
+        # Python scalars once, which is several times faster than per-node
+        # numpy scalar access.
+        xyz = np.round(self.node_xyz[nodes].astype(np.float64), 4).tolist()
+        if use_radius:
+            radius = self.node_feats["radius"][nodes].astype(np.float64)
+            radius = radius.tolist()
+        else:
+            radius = [2] * n
+        if "type" in self.node_feats:
+            types = self.node_feats["type"][nodes].tolist()
+        else:
+            types = [2] * n
 
-            # Deduplicate filename within zip
-            swc_id = self.node_swc_id(root)
-            name = f"{swc_id}.swc"
-            suffix = 0
-            while name in zipfile.NameToInfo:
-                name = f"{swc_id}.{suffix}.swc"
-                suffix += 1
-            zipfile.writestr(name, text_buffer.getvalue())
+        lines = [
+            f"{i} {t} {x} {y} {z} {r} {p}"
+            for i, t, (x, y, z), r, p in zip(
+                range(1, n + 1), types, xyz, radius, parents.tolist()
+            )
+        ]
+        text = "# id, type, z, y, x, r, pid\n" + "\n".join(lines)
+
+        # Deduplicate filename within zip (getinfo is O(1); namelist is O(n))
+        swc_id = self.node_swc_id(root)
+        name = f"{swc_id}.swc"
+        suffix = 0
+        while True:
+            try:
+                zipfile.getinfo(name)
+            except KeyError:
+                break
+            name = f"{swc_id}.{suffix}.swc"
+            suffix += 1
+        zipfile.writestr(name, text)
 
     # --- Helpers ---
     def branching_nodes(self):
@@ -465,21 +448,6 @@ class SkeletonGraph(rx.PyGraph):
         Returns all branching nodes.
         """
         return [i for i in self.node_indices() if self.degree(i) > 2]
-
-    def edge_lengths(self):
-        """
-        Returns all edges and their Euclidean lengths.
-
-        Returns
-        -------
-        edges : numpy.ndarray
-            Array of shape (n_edges, 2) containing node ID pairs.
-        lengths : numpy.ndarray
-            Length of each edge.
-        """
-        edges = np.array(self.edge_list(), dtype=np.int64).reshape(-1, 2)
-        diffs = self.node_xyz[edges[:, 0]] - self.node_xyz[edges[:, 1]]
-        return edges, np.linalg.norm(diffs, axis=1)
 
     def node_cable_lengths(self):
         """
@@ -516,6 +484,67 @@ class SkeletonGraph(rx.PyGraph):
             if cable_length > max_depth:
                 break
         return cable_length
+
+    def edge_lengths(self):
+        """
+        Computes the Euclidean length of every edge at once.
+
+        Returns
+        -------
+        edges : numpy.ndarray
+            Edge endpoints, of shape (num_edges, 2).
+        lengths : numpy.ndarray
+            Length of each edge, of shape (num_edges,).
+        """
+        edges = np.asarray(self.edge_list(), dtype=np.int64)
+        if len(edges) == 0:
+            return edges.reshape(0, 2), np.zeros(0)
+        diffs = self.node_xyz[edges[:, 0]] - self.node_xyz[edges[:, 1]]
+        return edges, np.linalg.norm(diffs.astype(np.float64), axis=1)
+
+    def component_cable_lengths(self):
+        """
+        Computes the cable length of every connected component in one
+        vectorized pass, instead of a Python DFS per component. Works on the
+        current node indices, so it does not require a relabel after node
+        removal.
+
+        Returns
+        -------
+        components : List[Set[int]]
+            Connected components, as returned by rx.connected_components.
+        lengths : numpy.ndarray
+            Cable length of each component, aligned with "components".
+        """
+        components = rx.connected_components(self)
+        if len(components) == 0:
+            return components, np.zeros(0)
+
+        labels = np.empty(max(self.node_indices()) + 1, dtype=np.int64)
+        for k, nodes in enumerate(components):
+            labels[list(nodes)] = k
+
+        edges, lengths = self.edge_lengths()
+        weights = lengths if len(edges) else None
+        idxs = labels[edges[:, 0]] if len(edges) else np.zeros(0, np.int64)
+        totals = np.bincount(idxs, weights=weights, minlength=len(components))
+        return components, totals
+
+    def node_cable_lengths(self):
+        """
+        Gets, for every node, the cable length of the component containing
+        it.
+
+        Returns
+        -------
+        numpy.ndarray
+            Array indexed by node ID.
+        """
+        components, lengths = self.component_cable_lengths()
+        result = np.zeros(max(self.node_indices(), default=-1) + 1)
+        for nodes, length in zip(components, lengths):
+            result[list(nodes)] = length
+        return result
 
     def clip_to_skeleton(self, gt_graph, dist):
         """
@@ -702,16 +731,29 @@ class SkeletonGraph(rx.PyGraph):
         """
         Gets nodes connected to root up to max_dist microns.
         """
-        queue = [(root, 0)]
-        visited = {root}
+        return list(self.path_distances_within(root, max_dist).keys())
+
+    def path_distances_within(self, root, max_dist):
+        """
+        Computes the along-skeleton distance from root to every node within
+        max_dist microns of it. The traversal never leaves the neighborhood,
+        unlike a shortest-path query over the whole component.
+
+        Returns
+        -------
+        Dict[int, float]
+            Maps each reachable node to its path distance from root.
+        """
+        dists = {root: 0.0}
+        queue = [(root, 0.0)]
         while queue:
             i, dist_i = queue.pop()
             for j in self.neighbors(i):
                 dist_j = dist_i + self.dist(i, j)
-                if dist_j < max_dist and j not in visited:
+                if dist_j < max_dist and j not in dists:
+                    dists[j] = dist_j
                     queue.append((j, dist_j))
-                    visited.add(j)
-        return list(visited)
+        return dists
 
     def path_from_leaf(self, leaf, max_depth=np.inf):
         """

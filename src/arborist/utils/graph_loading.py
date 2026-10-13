@@ -247,5 +247,5 @@ def _set_edge_attrs(graph, attrs):
 def _to_numpy(attrs):
     attrs["xyz"] = np.array(attrs["xyz"], dtype=np.float32)
     attrs["radius"] = np.array(attrs["radius"], dtype=np.float16)
-    attrs["type"] = np.array(attrs["type"], dtype=np.uint8)
+    attrs["type"] = np.array(attrs["type"], dtype=np.int8)
     return attrs

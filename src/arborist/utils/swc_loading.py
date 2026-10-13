@@ -391,7 +391,7 @@ class Reader:
             "id": np.zeros(n, dtype=int),
             "pid": np.zeros(n, dtype=int),
             "radius": np.zeros(n, dtype=float),
-            "type": np.zeros(n, dtype=np.uint8),
+            "type": np.zeros(n, dtype=np.int8),
             "xyz": np.zeros((n, 3), dtype=np.int32),
             "soma_nodes": set(),
             "swc_name": swc_name,
