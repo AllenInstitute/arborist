@@ -449,6 +449,19 @@ class SkeletonGraph(rx.PyGraph):
         """
         return [i for i in self.node_indices() if self.degree(i) > 2]
 
+    def node_cable_lengths(self):
+        """
+        Returns a dict mapping each node ID to the cable length of its
+        connected component, computed once per component rather than per leaf.
+        """
+        result = {}
+        for component in rx.connected_components(self):
+            root = next(iter(component))
+            length = self.cable_length(root=root)
+            for node in component:
+                result[node] = length
+        return result
+
     def cable_length(self, max_depth=np.inf, root=None):
         """
         Computes cable length of the graph or a connected component.
