@@ -63,7 +63,10 @@ def topological_decomposition(subgraph, root=0):
 
     while stack:
         parent, curr, path = stack.pop()
-        for nb in subgraph.neighbors(curr):
+        # rustworkx returns neighbors in an order that changes between calls;
+        # unsorted, the path split at each branching node (and so each
+        # curve's direction and contents) would vary per decomposition.
+        for nb in sorted(subgraph.neighbors(curr)):
             if nb == parent or nb in visited:
                 continue
             visited.add(nb)
