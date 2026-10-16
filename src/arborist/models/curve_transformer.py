@@ -66,7 +66,7 @@ class CurveEncoder(nn.Module):
             batch_first=True,
         )
         self.transformer = nn.TransformerEncoder(
-            encoder_layer, num_layers=n_layers
+            encoder_layer, num_layers=n_layers, enable_nested_tensor=False
         )
         self.to_latent = nn.Sequential(
             nn.LayerNorm(d_token),
