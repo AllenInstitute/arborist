@@ -19,6 +19,8 @@ import numpy as np
 from arborist.utils import geometry
 from arborist.utils import swc_loading as swc_util
 
+SOMA_TYPE = 1
+
 
 class GraphLoader:
     """
@@ -241,10 +243,22 @@ def _resample_labels(labels, n_pts):
 
     Compartment codes are categorical, so they are resampled by nearest
     neighbor rather than spline-interpolated like radius and xyz, which would
-    invent codes that never appeared in the SWC file.
+    invent codes that never appeared in the SWC file. The one exception is
+    the soma: a resampled point lying between a soma node and a neurite node
+    is on the neurite, so it takes the neurite's code. Nearest neighbor alone
+    labels the first half of every soma-to-neurite edge as soma, which spreads
+    a single-node soma over tens of microns. The edge's endpoints keep their
+    own codes, and points between two soma nodes stay soma.
     """
-    idxs = np.rint(np.linspace(0, len(labels) - 1, n_pts))
-    return labels[idxs.astype(int)]
+    t = np.linspace(0, len(labels) - 1, n_pts)
+    out = labels[np.rint(t).astype(int)]
+    lo = np.floor(t).astype(int)
+    hi = np.minimum(lo + 1, len(labels) - 1)
+    interior = np.zeros(n_pts, dtype=bool)
+    interior[1:-1] = True
+    fix = interior & (out == SOMA_TYPE) & (labels[lo] != labels[hi])
+    out[fix] = np.where(labels[lo[fix]] == SOMA_TYPE, labels[hi[fix]], labels[lo[fix]])
+    return out
 
 
 def _set_node_attrs(graph, nodes):
