@@ -48,6 +48,27 @@ most informative for the task. The eigendecomposition is done once per sample
 in the dataset worker; the model only contracts the basis with the learned
 time scales.
 
+
+Geometric Heat Diffusion PE
+---------------------------
+The PE above treats every curve as one hop regardless of its length. A second
+heat kernel is computed from the conductance-weighted Laplacian L = D - W of
+the topological graph, with W = 1 / cable length per curve. Effective
+resistance between two nodes of a tree is then their cable distance, so heat
+reaches a node according to geometric distance from the root. It uses the same
+number of time scales (n_pe_components) as the topological kernel, but its
+eigenvalues scale as 1 / length, so its times are in microns; they are learned
+in log-space and initialized at [geo_t0, 4*geo_t0, 16*geo_t0, ...]. The two
+encodings are concatenated before the shared projection.
+
+
+Simple Root-Distance PE (ablation baseline)
+-------------------------------------------
+With pe_type="simple" the heat kernels are replaced by two direct measures of
+distance from the root, read at each curve's proximal and distal endpoints:
+hop count (number of curves on the path) and cable length, log-compressed as
+log1p(cable / geom_scale). The four values go through the same projection.
+
 """
 
 import math
@@ -72,19 +93,34 @@ class GraphTransformer(nn.Module):
         dropout=0.1,
         n_pe_components=4,
         max_rel_dist=4,
+        geo_t0=5.0,
+        pe_type="heat",
+        geom_scale=10.0,
     ):
         super().__init__()
+        if pe_type not in ("heat", "simple"):
+            raise ValueError(f"pe_type must be 'heat' or 'simple', got {pe_type!r}")
         self.n_pe_components = n_pe_components
         self.max_rel_dist = max_rel_dist
         self.n_heads = n_heads
+        self.pe_type = pe_type
+        self.geom_scale = geom_scale
 
-        # Global PE: k learnable diffusion times (log-space for positivity),
-        # initialized at [1, 2, 4, ..., 2^(k-1)]; heat at a curve's two
-        # endpoints (2k values) is projected to latent_dim
-        self.log_times = nn.Parameter(
-            math.log(2) * torch.arange(n_pe_components, dtype=torch.float32)
-        )
-        self.pe_proj = nn.Linear(2 * n_pe_components, latent_dim)
+        # Global PE. "heat": k learnable diffusion times (log-space for
+        # positivity), initialized at [1, 2, 4, ..., 2^(k-1)]; heat at a
+        # curve's two endpoints (2k values) for each of the topological and
+        # geometric kernels is projected to latent_dim. "simple": hop count
+        # and log cable length from the root at both endpoints (4 values).
+        if pe_type == "heat":
+            self.log_times = nn.Parameter(
+                math.log(2) * torch.arange(n_pe_components, dtype=torch.float32)
+            )
+            self.geo_log_times = nn.Parameter(
+                math.log(geo_t0) + math.log(4) * torch.arange(n_pe_components, dtype=torch.float32)
+            )
+            self.pe_proj = nn.Linear(4 * n_pe_components, latent_dim)
+        else:
+            self.pe_proj = nn.Linear(4, latent_dim)
 
         # Relative PE: one learned scalar bias per head per distance bucket
         # Buckets: 0=self, 1..max_rel_dist=hop count, max_rel_dist+1=far/unreachable
@@ -101,7 +137,7 @@ class GraphTransformer(nn.Module):
         self.norm = nn.LayerNorm(latent_dim)
 
     # --- Positional encoding helpers ---
-    def _heat_diffusion_pe(self, heat_lam, heat_basis, node_endpoints, device):
+    def _heat_diffusion_pe(self, heat_lam, heat_basis, node_endpoints, log_times, device):
         """
         Heat kernel from the root over the topological graph at k learned
         time scales, read out at each node's (proximal, distal) endpoints.
@@ -113,6 +149,8 @@ class GraphTransformer(nn.Module):
         node_endpoints : array-like, shape (n, 2)
             Topological node indices per attention node. The CLS node uses
             (root, root).
+        log_times : torch.Tensor, shape (k,)
+            Log of the diffusion time scales.
 
         Returns (n, 2k).
         """
@@ -120,10 +158,20 @@ class GraphTransformer(nn.Module):
         basis = torch.as_tensor(heat_basis, dtype=torch.float32, device=device)
         ends = torch.as_tensor(node_endpoints, dtype=torch.long, device=device)
 
-        times = self.log_times.exp()                                      # (k,)
+        times = log_times.exp()                                           # (k,)
         heat = basis @ torch.exp(-lam[:, None] * times[None, :])          # (n_topo, k)
         heat = heat / heat[0:1].clamp(min=1e-8)                          # root ≡ 1 per scale
         return heat[ends].reshape(ends.shape[0], -1)                      # (n, 2k)
+
+    def _simple_pe(self, topo_hops, topo_cable, node_endpoints, device):
+        """
+        Hop count and log-compressed cable length from the root, read at each
+        node's (proximal, distal) endpoints. Returns (n, 4).
+        """
+        hops = torch.as_tensor(topo_hops, dtype=torch.float32, device=device)
+        cable = torch.as_tensor(topo_cable, dtype=torch.float32, device=device)
+        ends = torch.as_tensor(node_endpoints, dtype=torch.long, device=device)
+        return torch.cat([hops[ends], torch.log1p(cable[ends] / self.geom_scale)], dim=1)
 
     def _hop_dist_matrix(self, n, edge_index):
         """BFS fallback — returns int8 ndarray. Only used when hop_dist not precomputed."""
@@ -165,7 +213,10 @@ class GraphTransformer(nn.Module):
         return bias
 
     # --- Forward ---
-    def forward(self, x, edge_index, heat_lam, heat_basis, node_endpoints, edge_type=None, hop_dist=None):
+    def forward(
+        self, x, edge_index, heat_lam, heat_basis, geo_heat_lam, geo_heat_basis,
+        topo_hops, topo_cable, node_endpoints, edge_type=None, hop_dist=None,
+    ):
         """
         Parameters
         ----------
@@ -185,6 +236,12 @@ class GraphTransformer(nn.Module):
         hop_dist : array-like or None
             Shape (n, n) line-graph hop distances, -1 = unreachable. BFS
             fallback if None.
+        geo_heat_lam, geo_heat_basis : numpy.ndarray
+            Conductance-weighted counterparts of heat_lam / heat_basis. From
+            TreeSample. Used when pe_type is "heat".
+        topo_hops, topo_cable : numpy.ndarray
+            Shape (n_topo,) hop count and cable length from the root to each
+            topological node. From TreeSample. Used when pe_type is "simple".
 
         Returns
         -------
@@ -193,10 +250,18 @@ class GraphTransformer(nn.Module):
         """
         n, device = x.shape[0], x.device
 
-        # Add heat diffusion PE from the root before any attention
-        x = x + self.pe_proj(
-            self._heat_diffusion_pe(heat_lam, heat_basis, node_endpoints, device)
-        )
+        # Add the global PE from the root before any attention
+        if self.pe_type == "heat":
+            pe = self._heat_diffusion_pe(
+                heat_lam, heat_basis, node_endpoints, self.log_times, device
+            )
+            geo_pe = self._heat_diffusion_pe(
+                geo_heat_lam, geo_heat_basis, node_endpoints, self.geo_log_times, device
+            )
+            pe = torch.cat([pe, geo_pe], dim=1)
+        else:
+            pe = self._simple_pe(topo_hops, topo_cable, node_endpoints, device)
+        x = x + self.pe_proj(pe)
 
         # Build per-head float attention bias: hop distance + edge direction type
         if hop_dist is None:

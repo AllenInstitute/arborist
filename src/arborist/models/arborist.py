@@ -59,6 +59,11 @@ class Arborist(nn.Module):
         log1p(L / r0). Resolution is near-linear below r0 and logarithmic
         above, so bounded subgraphs and whole-brain arbors share one
         order-one feature range. Default is 10.0.
+    graph_pe_type : str, optional
+        Global positional encoding in the GraphTransformer. "heat" uses the
+        topological and geometric heat-diffusion kernels; "simple" uses hop
+        count and log-compressed cable length from the root. Default is
+        "heat".
     """
 
     def __init__(
@@ -76,6 +81,7 @@ class Arborist(nn.Module):
         latent_dim=64,
         dropout=0.1,
         geom_scale=10.0,
+        graph_pe_type="heat",
     ):
         super().__init__()
         self.config = {
@@ -92,6 +98,7 @@ class Arborist(nn.Module):
             "latent_dim": latent_dim,
             "dropout": dropout,
             "geom_scale": geom_scale,
+            "graph_pe_type": graph_pe_type,
         }
         self.curve_encoder = CurveEncoder(
             segment_len=curve_segment_len,
@@ -110,6 +117,8 @@ class Arborist(nn.Module):
             dropout=dropout,
             n_pe_components=graph_n_pe_components,
             max_rel_dist=graph_max_rel_dist,
+            pe_type=graph_pe_type,
+            geom_scale=geom_scale,
         )
         self.cls_token = nn.Parameter(torch.zeros(latent_dim))
 
@@ -234,6 +243,10 @@ class Arborist(nn.Module):
             node_endpoints=node_endpoints,
             edge_type=edge_type_ext,
             hop_dist=hop_ext,
+            geo_heat_lam=sample.geo_heat_lam,
+            geo_heat_basis=sample.geo_heat_basis,
+            topo_hops=sample.topo_hops,
+            topo_cable=sample.topo_cable,
         )
 
         # CLS token output is the global tree embedding; remaining nodes are per-curve

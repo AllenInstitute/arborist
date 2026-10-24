@@ -195,6 +195,19 @@ class TreeSample:
         Shape (n_topo, n_topo). Pre-multiplied eigenbasis: basis[v, j] =
         phi_j(v) * phi_j(root), so H_t(root, v) = sum_j basis[v,j]*exp(-lam_j*t)
         is the heat reaching topological node v from the root (topo node 0).
+    geo_heat_lam : numpy.ndarray or None
+        Shape (n_topo,). Eigenvalues of the conductance-weighted Laplacian
+        L = D - W of the topological graph, with W = 1 / curve cable length.
+    geo_heat_basis : numpy.ndarray or None
+        Shape (n_topo, n_topo). Same layout as heat_basis, for the weighted
+        Laplacian, so heat spreads according to geometric (cable) distance
+        from the root instead of hop count.
+    topo_hops : numpy.ndarray or None
+        Shape (n_topo,) float32. Number of curves on the path from the root to
+        each topological node.
+    topo_cable : numpy.ndarray or None
+        Shape (n_topo,) float32. Cable length (microns) along the path from
+        the root to each topological node.
     curve_endpoints : numpy.ndarray or None
         Shape (n, 2) int64. (proximal, distal) topological node index of each
         curve; proximal is the endpoint closer to the root. Used to read each
@@ -233,7 +246,15 @@ class TreeSample:
         edge_type=None,
         hop_dist=None,
         target=None,
+        geo_heat_lam=None,
+        geo_heat_basis=None,
+        topo_hops=None,
+        topo_cable=None,
     ):
+        self.geo_heat_lam = geo_heat_lam
+        self.geo_heat_basis = geo_heat_basis
+        self.topo_hops = topo_hops
+        self.topo_cable = topo_cable
         self.curves = curves
         self.edge_index = edge_index
         self.root_curve_indices = root_curve_indices
@@ -354,6 +375,14 @@ def build_tree_sample(curves, topo_edge_index, target=None):
     root_curve_indices = [k for k, (u, v) in enumerate(topo_edge_index) if 0 in (u, v)]
     heat_lam, heat_basis = _compute_heat_basis(topo_edge_index)
     curve_geom = _compute_curve_geom(curves, curve_endpoints, len(heat_lam))
+    # Floor the length so a degenerate curve doesn't get infinite conductance
+    conductance = 1.0 / np.maximum(curve_geom[:, 6], 1.0)
+    geo_heat_lam, geo_heat_basis = _compute_heat_basis(
+        topo_edge_index, weights=conductance, normalized=False
+    )
+    topo_hops, topo_cable = _compute_root_distances(
+        topo_depths, curve_endpoints, curve_geom[:, 6], len(heat_lam)
+    )
     hop_dist = _compute_hop_dist(n, edge_index)
     is_root = np.zeros(n, dtype=np.float32)
     if root_curve_indices:
@@ -370,6 +399,10 @@ def build_tree_sample(curves, topo_edge_index, target=None):
         edge_type=edge_type,
         hop_dist=hop_dist,
         target=target,
+        geo_heat_lam=geo_heat_lam,
+        geo_heat_basis=geo_heat_basis,
+        topo_hops=topo_hops,
+        topo_cable=topo_cable,
     )
 
 
@@ -432,10 +465,37 @@ def _compute_curve_geom(curves, curve_endpoints, n_topo, root=0):
     return geom.astype(np.float32)
 
 
-def _compute_heat_basis(topo_edge_index, root=0):
+def _compute_root_distances(topo_depths, curve_endpoints, lengths, n_topo):
     """
-    Precompute the normalized Laplacian eigenbasis of the topological graph,
-    projected onto the root node.
+    Hop count and cable length from the root to every topological node.
+
+    Curves are visited by increasing proximal depth so each curve's proximal
+    value is final before its distal value is derived from it.
+    """
+    hops = np.zeros(n_topo, dtype=np.float32)
+    cable = np.zeros(n_topo, dtype=np.float32)
+    order = np.argsort([topo_depths.get(p, 0) for p in curve_endpoints[:, 0]], kind="stable")
+    for k in order:
+        p, d = curve_endpoints[k]
+        hops[d] = hops[p] + 1
+        cable[d] = cable[p] + lengths[k]
+    return hops, cable
+
+
+def _compute_heat_basis(topo_edge_index, root=0, weights=None, normalized=True):
+    """
+    Precompute the Laplacian eigenbasis of the topological graph, projected
+    onto the root node.
+
+    Parameters
+    ----------
+    weights : array-like, shape (n_edges,), optional
+        Edge conductances parallel to topo_edge_index. Default is 1 per edge
+        (topological distance).
+    normalized : bool, optional
+        If True, use the symmetric normalized Laplacian I - D^-1/2 W D^-1/2.
+        If False, use L = D - W, whose stationary state is uniform and whose
+        conductance-weighted form makes heat spread by geometric distance.
 
     Returns lam (n_topo,) and basis (n_topo, n_topo) where basis[v, j] =
     phi_j(v) * phi_j(root), so the model only needs to contract with learned
@@ -446,11 +506,16 @@ def _compute_heat_basis(topo_edge_index, root=0):
         return np.zeros(n, dtype=np.float32), np.zeros((n, n), dtype=np.float32)
 
     adj = np.zeros((n, n), dtype=np.float64)
-    for u, v in topo_edge_index:
-        adj[u, v] = adj[v, u] = 1.0
-    deg = adj.sum(axis=1).clip(min=1e-8)
-    d_inv_sqrt = deg ** -0.5
-    L = np.eye(n) - d_inv_sqrt[:, None] * adj * d_inv_sqrt[None, :]
+    if weights is None:
+        weights = np.ones(len(topo_edge_index))
+    for (u, v), w in zip(topo_edge_index, weights):
+        adj[u, v] = adj[v, u] = w
+    deg = adj.sum(axis=1)
+    if normalized:
+        d_inv_sqrt = deg.clip(min=1e-8) ** -0.5
+        L = np.eye(n) - d_inv_sqrt[:, None] * adj * d_inv_sqrt[None, :]
+    else:
+        L = np.diag(deg) - adj
 
     try:
         eigvals, eigvecs = np.linalg.eigh(L)
