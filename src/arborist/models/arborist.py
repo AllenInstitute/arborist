@@ -13,6 +13,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from arborist.data.datasets import collate_curves
 from arborist.models.curve_transformer import CurveEncoder
 from arborist.models.graph_transformer import GraphTransformer
 
@@ -59,11 +60,6 @@ class Arborist(nn.Module):
         log1p(L / r0). Resolution is near-linear below r0 and logarithmic
         above, so bounded subgraphs and whole-brain arbors share one
         order-one feature range. Default is 10.0.
-    graph_pe_type : str, optional
-        Global positional encoding in the GraphTransformer. "heat" uses the
-        topological and geometric heat-diffusion kernels; "simple" uses hop
-        count and log-compressed cable length from the root. Default is
-        "heat".
     """
 
     def __init__(
@@ -76,12 +72,10 @@ class Arborist(nn.Module):
         graph_n_heads=4,
         graph_n_layers=3,
         graph_d_ff=128,
-        graph_n_pe_components=4,
         graph_max_rel_dist=4,
         latent_dim=64,
         dropout=0.1,
         geom_scale=10.0,
-        graph_pe_type="heat",
     ):
         super().__init__()
         self.config = {
@@ -93,12 +87,10 @@ class Arborist(nn.Module):
             "graph_n_heads": graph_n_heads,
             "graph_n_layers": graph_n_layers,
             "graph_d_ff": graph_d_ff,
-            "graph_n_pe_components": graph_n_pe_components,
             "graph_max_rel_dist": graph_max_rel_dist,
             "latent_dim": latent_dim,
             "dropout": dropout,
             "geom_scale": geom_scale,
-            "graph_pe_type": graph_pe_type,
         }
         self.curve_encoder = CurveEncoder(
             segment_len=curve_segment_len,
@@ -115,10 +107,7 @@ class Arborist(nn.Module):
             n_layers=graph_n_layers,
             d_ff=graph_d_ff,
             dropout=dropout,
-            n_pe_components=graph_n_pe_components,
             max_rel_dist=graph_max_rel_dist,
-            pe_type=graph_pe_type,
-            geom_scale=geom_scale,
         )
         self.cls_token = nn.Parameter(torch.zeros(latent_dim))
 
@@ -130,25 +119,16 @@ class Arborist(nn.Module):
             nn.Linear(latent_dim, latent_dim),
         )
 
+    def _compress_length(self, length):
+        """Log compression of lengths in microns; see geom_scale."""
+        return torch.log1p(length / self.geom_scale)
+
     def _compress_geom(self, geom):
         """Log-radial compression of (n, 7) placement features; see geom_scale."""
         pos = geom[:, :6].reshape(-1, 2, 3)
         r = pos.norm(dim=-1, keepdim=True)
-        pos = pos * torch.log1p(r / self.geom_scale) / r.clamp(min=1e-6)
-        length = torch.log1p(geom[:, 6:] / self.geom_scale)
-        return torch.cat([pos.reshape(-1, 6), length], dim=1)
-
-    def _collate_curves(self, curves):
-        device = next(self.parameters()).device
-        lengths = [len(c) for c in curves]
-        n_max = max(max(lengths), self.curve_encoder.segment_len)
-        B = len(curves)
-        diffs = torch.zeros(B, n_max, 3, device=device)
-        mask = torch.ones(B, n_max, dtype=torch.bool, device=device)
-        for i, (c, l) in enumerate(zip(curves, lengths)):
-            diffs[i, :l] = torch.as_tensor(c, dtype=torch.float32, device=device)
-            mask[i, :l] = False
-        return diffs, mask
+        pos = pos * self._compress_length(r) / r.clamp(min=1e-6)
+        return torch.cat([pos.reshape(-1, 6), self._compress_length(geom[:, 6:])], dim=1)
 
     @torch._dynamo.disable
     def encode(self, sample):
@@ -176,7 +156,9 @@ class Arborist(nn.Module):
             return empty, empty.unsqueeze(0)
 
         # Embed each curve independently via the sequence transformer
-        diffs, mask = self._collate_curves(sample.curves)
+        diffs, mask = collate_curves(
+            sample.curves, min_len=self.curve_encoder.segment_len, device=device
+        )
         z, _ = self.curve_encoder(diffs, mask)
 
         # Add each curve's placement in the shared tree frame; the curve
@@ -184,69 +166,49 @@ class Arborist(nn.Module):
         geom = torch.as_tensor(sample.curve_geom, dtype=torch.float32, device=device)
         z = z + self.geom_proj(self._compress_geom(geom))
 
-        root_indices = sample.root_curve_indices
-
         # Prepend CLS token; shift curve edge_index by 1 to make room
-        edge_index = torch.as_tensor(sample.edge_index, dtype=torch.long, device=device)
-        edge_index_ext = edge_index + 1 if edge_index.shape[1] > 0 else edge_index
+        n_c = len(sample.curves)
+        edge_index = torch.as_tensor(sample.edge_index, dtype=torch.long, device=device) + 1
         z_all = torch.cat([self.cls_token.unsqueeze(0), z], dim=0)
 
         # Connect CLS (node 0) to root-adjacent curves so it acts as the virtual root
-        root_shifted = [r + 1 for r in root_indices] if root_indices else list(range(1, len(sample.curves) + 1))
-        cls_src = torch.zeros(len(root_shifted), dtype=torch.long, device=device)
-        cls_dst = torch.tensor(root_shifted, dtype=torch.long, device=device)
+        root_t = torch.tensor(sample.root_curve_indices, dtype=torch.long, device=device)
+        cls_src = torch.zeros(len(root_t), dtype=torch.long, device=device)
+        cls_dst = root_t + 1
         cls_edges = torch.stack([torch.cat([cls_src, cls_dst]), torch.cat([cls_dst, cls_src])])
-        edge_index_ext = torch.cat([edge_index_ext, cls_edges], dim=1)
+        edge_index_ext = torch.cat([edge_index, cls_edges], dim=1)
 
-        # Extend edge_type: original types shift cleanly; CLS→root is P2C, root→CLS is C2P
-        orig_et = getattr(sample, "edge_type", None)
-        if orig_et is not None:
-            cls_et = torch.cat([
-                torch.zeros(len(root_shifted), dtype=torch.long, device=device),  # CLS→root: P2C
-                torch.ones(len(root_shifted), dtype=torch.long, device=device),   # root→CLS: C2P
-            ])
-            edge_type_ext = torch.cat([
-                torch.as_tensor(orig_et, dtype=torch.long, device=device), cls_et
-            ])
-        else:
-            edge_type_ext = None
+        # Extend edge_type: CLS→root is P2C (0), root→CLS is C2P (1)
+        edge_type_ext = torch.cat([
+            torch.as_tensor(sample.edge_type, dtype=torch.long, device=device),
+            torch.zeros(len(root_t), dtype=torch.long, device=device),
+            torch.ones(len(root_t), dtype=torch.long, device=device),
+        ])
 
         # Extend precomputed hop_dist to include CLS as node 0
-        orig_hop = getattr(sample, "hop_dist", None)
-        if orig_hop is not None:
-            orig = torch.as_tensor(orig_hop, dtype=torch.long, device=device)  # (n, n)
-            n_c = orig.shape[0]
-            hop_ext = torch.full((n_c + 1, n_c + 1), -1, dtype=torch.long, device=device)
-            hop_ext[0, 0] = 0
-            hop_ext[1:, 1:] = orig
-            # CLS row: 1 + min dist from any root curve to each curve
-            root_t = torch.tensor(root_indices or list(range(n_c)), dtype=torch.long, device=device)
-            min_d = orig[root_t].clone()
-            min_d[min_d < 0] = 127          # sentinel for unreachable before min
-            cls_row, _ = min_d.min(dim=0)   # (n_c,)
-            cls_row = cls_row + 1
-            cls_row[cls_row > 127] = -1     # propagate unreachable
-            hop_ext[0, 1:] = cls_row
-            hop_ext[1:, 0] = cls_row
-        else:
-            hop_ext = None
+        orig = torch.as_tensor(sample.hop_dist, dtype=torch.long, device=device)  # (n_c, n_c)
+        hop_ext = torch.full((n_c + 1, n_c + 1), -1, dtype=torch.long, device=device)
+        hop_ext[0, 0] = 0
+        hop_ext[1:, 1:] = orig
+        # CLS row: 1 + min dist from any root curve to each curve
+        min_d = orig[root_t].clone()
+        min_d[min_d < 0] = 127          # sentinel for unreachable before min
+        cls_row = min_d.min(dim=0).values + 1
+        cls_row[cls_row > 127] = -1     # propagate unreachable
+        hop_ext[0, 1:] = cls_row
+        hop_ext[1:, 0] = cls_row
 
-        # CLS sits at the topological root (node 0); curves read heat at their endpoints
+        # CLS sits at the topological root (node 0); curves read the PE at their endpoints
         node_endpoints = np.concatenate(
             [np.zeros((1, 2), dtype=np.int64), np.asarray(sample.curve_endpoints, dtype=np.int64)]
         )
 
+        topo_cable = torch.as_tensor(sample.topo_cable, dtype=torch.float32, device=device)
         z_out = self.graph_transformer(
-            z_all, edge_index_ext,
-            heat_lam=sample.heat_lam,
-            heat_basis=sample.heat_basis,
-            node_endpoints=node_endpoints,
-            edge_type=edge_type_ext,
-            hop_dist=hop_ext,
-            geo_heat_lam=sample.geo_heat_lam,
-            geo_heat_basis=sample.geo_heat_basis,
+            z_all, edge_index_ext, edge_type_ext, hop_ext,
             topo_hops=sample.topo_hops,
-            topo_cable=sample.topo_cable,
+            topo_cable=self._compress_length(topo_cable),
+            node_endpoints=node_endpoints,
         )
 
         # CLS token output is the global tree embedding; remaining nodes are per-curve
@@ -263,8 +225,8 @@ class Arborist(nn.Module):
         )
 
     @classmethod
-    def load(cls, path):
-        checkpoint = torch.load(path)
+    def load(cls, path, map_location=None):
+        checkpoint = torch.load(path, map_location=map_location, weights_only=True)
         model = cls(**checkpoint["config"])
         model.load_state_dict(checkpoint["state_dict"])
         return model

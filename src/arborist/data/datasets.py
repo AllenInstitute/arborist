@@ -4,12 +4,14 @@ Created on Mon June 8 17:00:00 2026
 @author: Anna Grim
 @email: anna.grim@alleninstitute.org
 
-...
+Curve and rooted-subgraph datasets over a SkeletonGraph, and the TreeSample
+container consumed by the Arborist model.
 
 """
 
 from collections import defaultdict
 from copy import deepcopy
+from dataclasses import dataclass
 from torch.utils.data import Dataset, DataLoader, Sampler
 
 import numpy as np
@@ -24,7 +26,6 @@ from arborist.utils.util import write_json
 PARENT_TO_CHILD = 0   # curve i is closer to root than curve j
 CHILD_TO_PARENT = 1   # curve i is farther from root than curve j
 SIBLING = 2           # curves i and j share the same parent branch point
-NO_EDGE = 3           # default for pairs with no direct line-graph edge
 
 
 # --- Dataset Classes ---
@@ -170,9 +171,11 @@ class GraphDataset(Dataset):
         write_json(path, self.config)
 
 
+@dataclass(repr=False)
 class TreeSample:
     """
     A rooted subgraph ready to pass through CurveEncoder then GraphTransformer.
+    Construct via ``build_tree_sample``.
 
     Attributes
     ----------
@@ -185,87 +188,47 @@ class TreeSample:
         edge when they meet at a topological node (branch point or leaf),
         so message passing over this graph communicates between neighboring
         branches.
-    root_curve_indices : List[int] or None
+    edge_type : numpy.ndarray
+        Shape (E,) int64. Direction type for each line-graph edge, parallel
+        to edge_index. Values are PARENT_TO_CHILD (0), CHILD_TO_PARENT (1),
+        SIBLING (2). Used by GraphTransformer as per-head attention biases.
+    hop_dist : numpy.ndarray
+        Shape (n, n) int8. All-pairs BFS hop distances on the line graph,
+        precomputed so the model forward skips Python BFS entirely.
+        -1 encodes unreachable pairs.
+    root_curve_indices : List[int]
         Indices of curves adjacent to the root topological node.
-    heat_lam : numpy.ndarray or None
-        Shape (n_topo,). Eigenvalues of the normalized Laplacian of the
-        topological graph (root, branch points, leaves), precomputed so the
-        model only contracts with learned time scales.
-    heat_basis : numpy.ndarray or None
-        Shape (n_topo, n_topo). Pre-multiplied eigenbasis: basis[v, j] =
-        phi_j(v) * phi_j(root), so H_t(root, v) = sum_j basis[v,j]*exp(-lam_j*t)
-        is the heat reaching topological node v from the root (topo node 0).
-    geo_heat_lam : numpy.ndarray or None
-        Shape (n_topo,). Eigenvalues of the conductance-weighted Laplacian
-        L = D - W of the topological graph, with W = 1 / curve cable length.
-    geo_heat_basis : numpy.ndarray or None
-        Shape (n_topo, n_topo). Same layout as heat_basis, for the weighted
-        Laplacian, so heat spreads according to geometric (cable) distance
-        from the root instead of hop count.
-    topo_hops : numpy.ndarray or None
-        Shape (n_topo,) float32. Number of curves on the path from the root to
-        each topological node.
-    topo_cable : numpy.ndarray or None
-        Shape (n_topo,) float32. Cable length (microns) along the path from
-        the root to each topological node.
-    curve_endpoints : numpy.ndarray or None
+    curve_endpoints : numpy.ndarray
         Shape (n, 2) int64. (proximal, distal) topological node index of each
         curve; proximal is the endpoint closer to the root. Used to read each
-        curve's heat PE off the topological graph.
-    curve_geom : numpy.ndarray or None
+        curve's root-distance PE off the topological graph.
+    curve_geom : numpy.ndarray
         Shape (n, 7) float32. Placement of each curve in the shared subgraph
         frame with the root at the origin: proximal endpoint xyz (3), distal
         endpoint xyz (3), cable length (1). Reconstructed from the finite
         differences by walking the tree from the root, so the Arborist encoder
         can relate curves to each other and to the root.
-    is_root : numpy.ndarray or None
-        Shape (n,) float32. 1.0 for root-adjacent curves, 0.0 otherwise.
-    edge_type : numpy.ndarray or None
-        Shape (E,) int64. Direction type for each line-graph edge, parallel
-        to edge_index. Values are PARENT_TO_CHILD (0), CHILD_TO_PARENT (1),
-        SIBLING (2). Used by GraphTransformer as per-head attention biases.
-    hop_dist : numpy.ndarray or None
-        Shape (n, n) int8. All-pairs BFS hop distances on the line graph,
-        precomputed so the model forward skips Python BFS entirely.
-        -1 encodes unreachable pairs.
+    topo_hops : numpy.ndarray
+        Shape (n_topo,) float32. Number of curves on the path from the root to
+        each topological node.
+    topo_cable : numpy.ndarray
+        Shape (n_topo,) float32. Cable length (microns) along the path from
+        the root to each topological node.
     target : any, optional
         Supervised label for this sample (scalar, array, or dict). Stored
         alongside the sample so DataLoader batches can be self-contained.
     """
 
-    def __init__(
-        self,
-        curves,
-        edge_index,
-        root_curve_indices=None,
-        heat_lam=None,
-        heat_basis=None,
-        curve_endpoints=None,
-        curve_geom=None,
-        is_root=None,
-        edge_type=None,
-        hop_dist=None,
-        target=None,
-        geo_heat_lam=None,
-        geo_heat_basis=None,
-        topo_hops=None,
-        topo_cable=None,
-    ):
-        self.geo_heat_lam = geo_heat_lam
-        self.geo_heat_basis = geo_heat_basis
-        self.topo_hops = topo_hops
-        self.topo_cable = topo_cable
-        self.curves = curves
-        self.edge_index = edge_index
-        self.root_curve_indices = root_curve_indices
-        self.heat_lam = heat_lam
-        self.heat_basis = heat_basis
-        self.curve_endpoints = curve_endpoints
-        self.curve_geom = curve_geom
-        self.is_root = is_root
-        self.edge_type = edge_type
-        self.hop_dist = hop_dist
-        self.target = target
+    curves: list
+    edge_index: np.ndarray
+    edge_type: np.ndarray
+    hop_dist: np.ndarray
+    root_curve_indices: list
+    curve_endpoints: np.ndarray
+    curve_geom: np.ndarray
+    topo_hops: np.ndarray
+    topo_cable: np.ndarray
+    target: object = None
 
     def __repr__(self):
         return (
@@ -275,28 +238,9 @@ class TreeSample:
         )
 
 
-def _topo_depths(topo_edge_index):
-    """BFS from topological node 0; returns {node: depth} for all reachable nodes."""
-    adj = defaultdict(list)
-    for u, v in topo_edge_index:
-        adj[u].append(v)
-        adj[v].append(u)
-    depth = {0: 0}
-    queue = [0]
-    while queue:
-        nxt = []
-        for u in queue:
-            for v in adj[u]:
-                if v not in depth:
-                    depth[v] = depth[u] + 1
-                    nxt.append(v)
-        queue = nxt
-    return depth
-
-
-def _build_line_graph(topo_edge_index, topo_depths):
+def _build_line_graph(curve_endpoints):
     """
-    Build the line-graph edge_index, a parallel edge_type array, and the
+    Build the line-graph edge_index and a parallel edge_type array from the
     (proximal, distal) topological endpoints of each curve.
 
     For each pair of curves (i, j) sharing a topological node t the edge
@@ -307,19 +251,10 @@ def _build_line_graph(topo_edge_index, topo_depths):
       CHILD_TO_PARENT  t == proximal[i] and t == distal[j]
       SIBLING          t == proximal[i] and t == proximal[j]
     """
-    # Determine proximal/distal endpoint of each curve from BFS depths
-    proximal, distal = {}, {}
-    for k, (u, v) in enumerate(topo_edge_index):
-        if topo_depths.get(u, 0) <= topo_depths.get(v, 0):
-            proximal[k], distal[k] = u, v
-        else:
-            proximal[k], distal[k] = v, u
-
-    # Group curves by shared topological node
     topo_to_curves = defaultdict(list)
-    for k, (u, v) in enumerate(topo_edge_index):
-        topo_to_curves[u].append(k)
-        topo_to_curves[v].append(k)
+    for k, (p, d) in enumerate(curve_endpoints):
+        topo_to_curves[p].append(k)
+        topo_to_curves[d].append(k)
 
     src, dst, types = [], [], []
     for t, curves_at_t in topo_to_curves.items():
@@ -329,28 +264,24 @@ def _build_line_graph(topo_edge_index, topo_depths):
                     continue
                 src.append(i)
                 dst.append(j)
-                if t == distal[i] and t == proximal[j]:
+                if t == curve_endpoints[i, 1] and t == curve_endpoints[j, 0]:
                     types.append(PARENT_TO_CHILD)
-                elif t == proximal[i] and t == distal[j]:
+                elif t == curve_endpoints[i, 0] and t == curve_endpoints[j, 1]:
                     types.append(CHILD_TO_PARENT)
                 else:
                     types.append(SIBLING)
 
-    n = len(topo_edge_index)
-    endpoints = np.array(
-        [[proximal[k], distal[k]] for k in range(n)], dtype=np.int64
-    ).reshape(n, 2)
     if not src:
-        return np.zeros((2, 0), dtype=np.int64), np.zeros(0, dtype=np.int64), endpoints
-    return np.array([src, dst], dtype=np.int64), np.array(types, dtype=np.int64), endpoints
+        return np.zeros((2, 0), dtype=np.int64), np.zeros(0, dtype=np.int64)
+    return np.array([src, dst], dtype=np.int64), np.array(types, dtype=np.int64)
 
 
 def build_tree_sample(curves, topo_edge_index, target=None):
     """
     Build a fully-annotated TreeSample from preprocessed curves and topology.
 
-    Computes every structural field the model uses — edge types, heat-diffusion
-    basis, hop distances, and root flags — so model forward passes skip all
+    Computes every structural field the model uses — edge types, root
+    distances, and hop distances — so model forward passes skip all
     Python-side computation. All callers that construct TreeSamples should go
     through this factory to stay consistent.
 
@@ -360,8 +291,9 @@ def build_tree_sample(curves, topo_edge_index, target=None):
         Finite-difference curve arrays (already translated and differenced),
         each of shape (N_i, 3).
     topo_edge_index : List[Tuple[int, int]]
-        Topological graph edges, one per curve, as (src_topo, dst_topo) pairs.
-        Node 0 is the root.
+        Topological graph edges, one per curve, as (proximal, distal) pairs
+        with node 0 the root and every curve listed after its parent, as
+        produced by ``topological_decomposition``.
     target : any, optional
         Supervised label to embed in the sample.
 
@@ -369,38 +301,22 @@ def build_tree_sample(curves, topo_edge_index, target=None):
     -------
     TreeSample
     """
-    topo_depths = _topo_depths(topo_edge_index)
-    edge_index, edge_type, curve_endpoints = _build_line_graph(topo_edge_index, topo_depths)
     n = len(curves)
-    root_curve_indices = [k for k, (u, v) in enumerate(topo_edge_index) if 0 in (u, v)]
-    heat_lam, heat_basis = _compute_heat_basis(topo_edge_index)
-    curve_geom = _compute_curve_geom(curves, curve_endpoints, len(heat_lam))
-    # Floor the length so a degenerate curve doesn't get infinite conductance
-    conductance = 1.0 / np.maximum(curve_geom[:, 6], 1.0)
-    geo_heat_lam, geo_heat_basis = _compute_heat_basis(
-        topo_edge_index, weights=conductance, normalized=False
-    )
-    topo_hops, topo_cable = _compute_root_distances(
-        topo_depths, curve_endpoints, curve_geom[:, 6], len(heat_lam)
-    )
+    curve_endpoints = np.asarray(topo_edge_index, dtype=np.int64).reshape(n, 2)
+    edge_index, edge_type = _build_line_graph(curve_endpoints)
+    root_curve_indices = [k for k in range(n) if curve_endpoints[k, 0] == 0]
+    n_topo = 1 + int(curve_endpoints.max()) if n else 1
+    curve_geom, topo_hops, topo_cable = _compute_tree_geom(curves, curve_endpoints, n_topo)
     hop_dist = _compute_hop_dist(n, edge_index)
-    is_root = np.zeros(n, dtype=np.float32)
-    if root_curve_indices:
-        is_root[root_curve_indices] = 1.0
     return TreeSample(
         curves=curves,
         edge_index=edge_index,
         root_curve_indices=root_curve_indices,
-        heat_lam=heat_lam,
-        heat_basis=heat_basis,
         curve_endpoints=curve_endpoints,
         curve_geom=curve_geom,
-        is_root=is_root,
         edge_type=edge_type,
         hop_dist=hop_dist,
         target=target,
-        geo_heat_lam=geo_heat_lam,
-        geo_heat_basis=geo_heat_basis,
         topo_hops=topo_hops,
         topo_cable=topo_cable,
     )
@@ -429,139 +345,32 @@ def _compute_hop_dist(n, edge_index):
     return dist
 
 
-def _compute_curve_geom(curves, curve_endpoints, n_topo, root=0):
+def _compute_tree_geom(curves, curve_endpoints, n_topo):
     """
-    Place each curve in the shared subgraph frame (root at origin).
-
-    Topological node positions are recovered by walking the tree from the
-    root: a curve's distal endpoint is its proximal endpoint plus the sum of
-    its step vectors. Returns (n, 7) float32: proximal xyz, distal xyz, length.
-    """
-    n = len(curves)
-    pos = np.zeros((n_topo, 3), dtype=np.float64)
-    known = np.zeros(n_topo, dtype=bool)
-    known[root] = True
-    displacement = np.stack([np.asarray(c, dtype=np.float64).sum(axis=0) for c in curves]) if n else np.zeros((0, 3))
-    pending = list(range(n))
-    while pending:
-        remaining = []
-        for k in pending:
-            p, d = curve_endpoints[k]
-            if known[p]:
-                pos[d] = pos[p] + displacement[k]
-                known[d] = True
-            else:
-                remaining.append(k)
-        if len(remaining) == len(pending):
-            break
-        pending = remaining
-
-    length = np.array(
-        [np.linalg.norm(np.asarray(c, dtype=np.float64), axis=1).sum() for c in curves]
-    ).reshape(n, 1)
-    geom = np.concatenate(
-        [pos[curve_endpoints[:, 0]], pos[curve_endpoints[:, 1]], length], axis=1
-    ) if n else np.zeros((0, 7))
-    return geom.astype(np.float32)
-
-
-def _compute_root_distances(topo_depths, curve_endpoints, lengths, n_topo):
-    """
-    Hop count and cable length from the root to every topological node.
-
-    Curves are visited by increasing proximal depth so each curve's proximal
-    value is final before its distal value is derived from it.
-    """
-    hops = np.zeros(n_topo, dtype=np.float32)
-    cable = np.zeros(n_topo, dtype=np.float32)
-    order = np.argsort([topo_depths.get(p, 0) for p in curve_endpoints[:, 0]], kind="stable")
-    for k in order:
-        p, d = curve_endpoints[k]
-        hops[d] = hops[p] + 1
-        cable[d] = cable[p] + lengths[k]
-    return hops, cable
-
-
-def _compute_heat_basis(topo_edge_index, root=0, weights=None, normalized=True):
-    """
-    Precompute the Laplacian eigenbasis of the topological graph, projected
-    onto the root node.
-
-    Parameters
-    ----------
-    weights : array-like, shape (n_edges,), optional
-        Edge conductances parallel to topo_edge_index. Default is 1 per edge
-        (topological distance).
-    normalized : bool, optional
-        If True, use the symmetric normalized Laplacian I - D^-1/2 W D^-1/2.
-        If False, use L = D - W, whose stationary state is uniform and whose
-        conductance-weighted form makes heat spread by geometric distance.
-
-    Returns lam (n_topo,) and basis (n_topo, n_topo) where basis[v, j] =
-    phi_j(v) * phi_j(root), so the model only needs to contract with learned
-    time scales: H_t(root, v) = sum_j basis[v, j] * exp(-lam_j * t).
-    """
-    n = 1 + max((max(u, v) for u, v in topo_edge_index), default=root)
-    if n <= 1:
-        return np.zeros(n, dtype=np.float32), np.zeros((n, n), dtype=np.float32)
-
-    adj = np.zeros((n, n), dtype=np.float64)
-    if weights is None:
-        weights = np.ones(len(topo_edge_index))
-    for (u, v), w in zip(topo_edge_index, weights):
-        adj[u, v] = adj[v, u] = w
-    deg = adj.sum(axis=1)
-    if normalized:
-        d_inv_sqrt = deg.clip(min=1e-8) ** -0.5
-        L = np.eye(n) - d_inv_sqrt[:, None] * adj * d_inv_sqrt[None, :]
-    else:
-        L = np.diag(deg) - adj
-
-    try:
-        eigvals, eigvecs = np.linalg.eigh(L)
-    except Exception:
-        return np.zeros(n, dtype=np.float32), np.zeros((n, n), dtype=np.float32)
-
-    basis = eigvecs * eigvecs[root][None, :]
-    return eigvals.astype(np.float32), basis.astype(np.float32)
-
-
-def _build_line_graph_edge_index(topo_edge_index):
-    """
-    Converts topological-graph edge pairs into line-graph edge pairs.
-
-    In the topological graph each node is a branching/leaf point and each
-    edge is an irreducible path (a curve). In the line graph each curve
-    becomes a node and two curve-nodes are connected when they share a
-    topological endpoint.
-
-    Parameters
-    ----------
-    topo_edge_index : List[Tuple[int, int]]
-        Edges of the topological graph as (src_topo_idx, dst_topo_idx) pairs,
-        parallel to the list of curves.
+    Walk the tree from the root (at the origin) to place every topological
+    node and accumulate its hop count and cable distance from the root. A
+    curve's distal endpoint is its proximal endpoint plus the sum of its step
+    vectors. Curves are listed parent-first, so one pass suffices.
 
     Returns
     -------
-    numpy.ndarray
-        Shape (2, E), int64.
+    curve_geom : numpy.ndarray
+        Shape (n, 7) float32: proximal xyz, distal xyz, cable length.
+    topo_hops, topo_cable : numpy.ndarray
+        Shape (n_topo,) float32.
     """
-    topo_to_curves = defaultdict(list)
-    for curve_idx, (u, v) in enumerate(topo_edge_index):
-        topo_to_curves[u].append(curve_idx)
-        topo_to_curves[v].append(curve_idx)
-
-    src, dst = [], []
-    for neighbors in topo_to_curves.values():
-        for i in neighbors:
-            for j in neighbors:
-                if i != j:
-                    src.append(i)
-                    dst.append(j)
-
-    if not src:
-        return np.zeros((2, 0), dtype=np.int64)
-    return np.array([src, dst], dtype=np.int64)
+    pos = np.zeros((n_topo, 3))
+    hops = np.zeros(n_topo, dtype=np.float32)
+    cable = np.zeros(n_topo, dtype=np.float32)
+    length = np.zeros((len(curves), 1), dtype=np.float32)
+    for k, (p, d) in enumerate(curve_endpoints):
+        steps = np.asarray(curves[k], dtype=np.float64)
+        length[k] = np.linalg.norm(steps, axis=1).sum()
+        pos[d] = pos[p] + steps.sum(axis=0)
+        hops[d] = hops[p] + 1
+        cable[d] = cable[p] + length[k, 0]
+    geom = np.concatenate([pos[curve_endpoints[:, 0]], pos[curve_endpoints[:, 1]], length], axis=1)
+    return geom.astype(np.float32), hops, cable
 
 
 class DatasetCollection(Dataset):
@@ -699,7 +508,7 @@ class CurveSampler(Sampler):
         return self.examples_per_epoch
 
 
-def collate_curves(curves):
+def collate_curves(curves, min_len=1, device=None):
     """
     Pads a list of curves to the longest in the batch and generates an
     attention mask.
@@ -708,6 +517,10 @@ def collate_curves(curves):
     ----------
     curves : List[numpy.ndarray]
         Each of shape (N_i, 3), where N_i can vary.
+    min_len : int, optional
+        Minimum padded length, e.g. CurveEncoder's segment_len. Default is 1.
+    device : torch.device, optional
+        Device for the returned tensors. Default is None (CPU).
 
     Returns
     -------
@@ -717,13 +530,13 @@ def collate_curves(curves):
         Shape (B, N_max), True where padding.
     """
     lengths = [len(c) for c in curves]
-    n_max = max(lengths)
+    n_max = max(max(lengths), min_len)
     B = len(curves)
 
-    padded = torch.zeros(B, n_max, 3)
-    mask = torch.ones(B, n_max, dtype=torch.bool)
+    padded = torch.zeros(B, n_max, 3, device=device)
+    mask = torch.ones(B, n_max, dtype=torch.bool, device=device)
     for i, (c, l) in enumerate(zip(curves, lengths)):
-        padded[i, :l] = torch.tensor(c)
+        padded[i, :l] = torch.as_tensor(c, dtype=torch.float32, device=device)
         mask[i, :l] = False
     return padded, mask
 
