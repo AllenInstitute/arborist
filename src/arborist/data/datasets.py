@@ -257,7 +257,15 @@ def build_tree_sample(curves, topo_edge_index, target=None):
     hops = np.zeros(n_topo, dtype=np.float32)
     cable = np.zeros(n_topo, dtype=np.float32)
     ancestors = np.eye(n_topo, dtype=bool)
+    visited = np.zeros(n_topo, dtype=bool)
+    visited[0] = True
     for k, (p, d) in enumerate(topo_idx):
+        if not visited[p] or visited[d]:
+            raise ValueError(
+                f"topo_edge_index must list (proximal, distal) edges parent-first "
+                f"from root 0; curve {k} = ({p}, {d}) violates this"
+            )
+        visited[d] = True
         steps = np.asarray(curves[k], dtype=np.float64)
         pos[d] = pos[p] + steps.sum(axis=0)
         hops[d] = hops[p] + 1

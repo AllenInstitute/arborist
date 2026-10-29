@@ -40,7 +40,7 @@ class GlobalPE(nn.Module):
           log1p(r / geom_scale).
       topological_distance (1)
           Number of curves on the path from the root to the proximal
-          endpoint, i.e. the branch order.
+          endpoint, i.e. the branch order, compressed as log1p(hops).
       geometric_distance (1)
           Cable length from the root to the proximal endpoint, compressed as
           log1p(cable / geom_scale).
@@ -69,8 +69,8 @@ class GlobalPE(nn.Module):
         return log_radial(endpoints, self.geom_scale).reshape(endpoints.shape[0], 6)
 
     def topological_distance(self, hops):
-        """(n,) curves from root to proximal endpoint -> (n, 1)."""
-        return hops.unsqueeze(1)
+        """(n,) curves from root to proximal endpoint -> (n, 1) log-compressed."""
+        return torch.log1p(hops).unsqueeze(1)
 
     def geometric_distance(self, cable):
         """(n,) cable from root to proximal endpoint -> (n, 1) log-compressed."""
@@ -111,8 +111,9 @@ class RelativePE(nn.Module):
           times log1p(r / geom_scale).
       topological_distance (2)
           (upstream, downstream) hops: curves from i up to the lowest common
-          ancestor, then down to j. Mirror-symmetric, rel(j, i) = (d, u):
-          self is (0, 0), parent->child (0, 1), siblings (1, 1).
+          ancestor, then down to j, each compressed as log1p(hops).
+          Mirror-symmetric, rel(j, i) = (d, u): self is (0, 0),
+          parent->child (0, 1), siblings (1, 1).
       geometric_distance (2)
           (upstream, downstream) cable along the same path, each compressed
           as log1p(cable / geom_scale). Their sum is the tree path distance.
@@ -141,8 +142,8 @@ class RelativePE(nn.Module):
         return log_radial(anchors[None, :, :] - anchors[:, None, :], self.geom_scale)
 
     def topological_distance(self, rel_hops):
-        """(n, n, 2) (upstream, downstream) hops, passed through."""
-        return rel_hops
+        """(n, n, 2) (upstream, downstream) hops -> log-compressed."""
+        return torch.log1p(rel_hops)
 
     def geometric_distance(self, rel_cable):
         """(n, n, 2) (upstream, downstream) cable -> log-compressed."""
