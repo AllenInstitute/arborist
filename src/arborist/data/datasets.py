@@ -9,7 +9,6 @@ container consumed by the Arborist model.
 
 """
 
-from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass
 from torch.utils.data import Dataset, DataLoader, Sampler
@@ -20,12 +19,6 @@ import torch
 
 from arborist.utils.graph_utils import topological_decomposition
 from arborist.utils.util import write_json
-
-
-# Line-graph edge direction types (stored on TreeSample.edge_type)
-PARENT_TO_CHILD = 0   # curve i is closer to root than curve j
-CHILD_TO_PARENT = 1   # curve i is farther from root than curve j
-SIBLING = 2           # curves i and j share the same parent branch point
 
 
 # --- Dataset Classes ---
@@ -101,8 +94,8 @@ class GraphDataset(Dataset):
     Each item corresponds to one root node. __getitem__ extracts the
     subgraph within "max_depth" microns, decomposes it into irreducible paths
     via topological decomposition, computes first-order finite differences for
-    each path, and returns a TreeSample with those curves and the line-graph
-    connectivity between them.
+    each path, and returns a TreeSample with those curves and their placement
+    relative to the root.
     """
 
     def __init__(self, graph, root_nodes, max_depth=None, graph_transform=None):
@@ -177,113 +170,65 @@ class TreeSample:
     A rooted subgraph ready to pass through CurveEncoder then GraphTransformer.
     Construct via ``build_tree_sample``.
 
+    The curves themselves are translation invariant; the positional arrays
+    say where each curve sits relative to the root and to every other curve
+    and feed the positional encodings (see arborist.models.positional_encoding).
+    They are indexed by token: token 0 is the root and ``curves[k]`` is token
+    ``k + 1``, with T = n_curves + 1 tokens in all.
+
     Attributes
     ----------
     curves : List[numpy.ndarray]
         One array per irreducible path, each of shape (N_i, 3). Values are
         first-order finite differences with a leading zero row, matching the
         convention expected by CurveEncoder.
-    edge_index : numpy.ndarray
-        Shape (2, E), dtype int64. Line-graph adjacency: two curves share an
-        edge when they meet at a topological node (branch point or leaf),
-        so message passing over this graph communicates between neighboring
-        branches.
-    edge_type : numpy.ndarray
-        Shape (E,) int64. Direction type for each line-graph edge, parallel
-        to edge_index. Values are PARENT_TO_CHILD (0), CHILD_TO_PARENT (1),
-        SIBLING (2). Used by GraphTransformer as per-head attention biases.
-    hop_dist : numpy.ndarray
-        Shape (n, n) int8. All-pairs BFS hop distances on the line graph,
-        precomputed so the model forward skips Python BFS entirely.
-        -1 encodes unreachable pairs.
     root_curve_indices : List[int]
-        Indices of curves adjacent to the root topological node.
-    curve_endpoints : numpy.ndarray
-        Shape (n, 2) int64. (proximal, distal) topological node index of each
-        curve; proximal is the endpoint closer to the root. Used to read each
-        curve's root-distance PE off the topological graph.
-    curve_geom : numpy.ndarray
-        Shape (n, 7) float32. Placement of each curve in the shared subgraph
-        frame with the root at the origin: proximal endpoint xyz (3), distal
-        endpoint xyz (3), cable length (1). Reconstructed from the finite
-        differences by walking the tree from the root, so the Arborist encoder
-        can relate curves to each other and to the root.
-    topo_hops : numpy.ndarray
-        Shape (n_topo,) float32. Number of curves on the path from the root to
-        each topological node.
-    topo_cable : numpy.ndarray
-        Shape (n_topo,) float32. Cable length (microns) along the path from
-        the root to each topological node.
+        Indices into ``curves`` of the curves adjacent to the root.
+    endpoints : numpy.ndarray
+        Shape (T, 2, 3) float32. Proximal and distal endpoint xyz of each
+        token in the subgraph frame with the root at the origin; proximal is
+        the endpoint closer to the root. Both are the origin for the root.
+    hops : numpy.ndarray
+        Shape (T,) float32. Number of curves on the path from the root to
+        each token's proximal endpoint (branch order).
+    cable : numpy.ndarray
+        Shape (T,) float32. Cable length (microns) along the path from the
+        root to each token's proximal endpoint.
+    rel_hops : numpy.ndarray
+        Shape (T, T, 2) float32. For tokens (i, j), anchored at their distal
+        endpoints: curves from i up to the lowest common ancestor, then down
+        to j. rel_hops[j, i] is rel_hops[i, j] reversed.
+    rel_cable : numpy.ndarray
+        Shape (T, T, 2) float32. Cable length (microns) along the same
+        upstream and downstream path segments.
     target : any, optional
         Supervised label for this sample (scalar, array, or dict). Stored
         alongside the sample so DataLoader batches can be self-contained.
     """
 
     curves: list
-    edge_index: np.ndarray
-    edge_type: np.ndarray
-    hop_dist: np.ndarray
     root_curve_indices: list
-    curve_endpoints: np.ndarray
-    curve_geom: np.ndarray
-    topo_hops: np.ndarray
-    topo_cable: np.ndarray
+    endpoints: np.ndarray
+    hops: np.ndarray
+    cable: np.ndarray
+    rel_hops: np.ndarray
+    rel_cable: np.ndarray
     target: object = None
 
     def __repr__(self):
-        return (
-            f"TreeSample("
-            f"n_curves={len(self.curves)}, "
-            f"n_edges={self.edge_index.shape[1]})"
-        )
-
-
-def _build_line_graph(curve_endpoints):
-    """
-    Build the line-graph edge_index and a parallel edge_type array from the
-    (proximal, distal) topological endpoints of each curve.
-
-    For each pair of curves (i, j) sharing a topological node t the edge
-    type is determined by whether t is the proximal (root-side) or distal
-    (leaf-side) endpoint of each curve:
-
-      PARENT_TO_CHILD  t == distal[i]   and t == proximal[j]
-      CHILD_TO_PARENT  t == proximal[i] and t == distal[j]
-      SIBLING          t == proximal[i] and t == proximal[j]
-    """
-    topo_to_curves = defaultdict(list)
-    for k, (p, d) in enumerate(curve_endpoints):
-        topo_to_curves[p].append(k)
-        topo_to_curves[d].append(k)
-
-    src, dst, types = [], [], []
-    for t, curves_at_t in topo_to_curves.items():
-        for i in curves_at_t:
-            for j in curves_at_t:
-                if i == j:
-                    continue
-                src.append(i)
-                dst.append(j)
-                if t == curve_endpoints[i, 1] and t == curve_endpoints[j, 0]:
-                    types.append(PARENT_TO_CHILD)
-                elif t == curve_endpoints[i, 0] and t == curve_endpoints[j, 1]:
-                    types.append(CHILD_TO_PARENT)
-                else:
-                    types.append(SIBLING)
-
-    if not src:
-        return np.zeros((2, 0), dtype=np.int64), np.zeros(0, dtype=np.int64)
-    return np.array([src, dst], dtype=np.int64), np.array(types, dtype=np.int64)
+        return f"TreeSample(n_curves={len(self.curves)})"
 
 
 def build_tree_sample(curves, topo_edge_index, target=None):
     """
     Build a fully-annotated TreeSample from preprocessed curves and topology.
 
-    Computes every structural field the model uses — edge types, root
-    distances, and hop distances — so model forward passes skip all
-    Python-side computation. All callers that construct TreeSamples should go
-    through this factory to stay consistent.
+    Walks the tree once to place every curve's endpoints in the root frame and
+    accumulate hop count and cable length from the root, then derives the
+    pairwise (upstream, downstream) hops and cable between tokens from their
+    lowest common ancestors, so model forward passes skip all Python-side
+    computation. All callers that construct TreeSamples should go through
+    this factory to stay consistent.
 
     Parameters
     ----------
@@ -302,75 +247,48 @@ def build_tree_sample(curves, topo_edge_index, target=None):
     TreeSample
     """
     n = len(curves)
-    curve_endpoints = np.asarray(topo_edge_index, dtype=np.int64).reshape(n, 2)
-    edge_index, edge_type = _build_line_graph(curve_endpoints)
-    root_curve_indices = [k for k in range(n) if curve_endpoints[k, 0] == 0]
-    n_topo = 1 + int(curve_endpoints.max()) if n else 1
-    curve_geom, topo_hops, topo_cable = _compute_tree_geom(curves, curve_endpoints, n_topo)
-    hop_dist = _compute_hop_dist(n, edge_index)
-    return TreeSample(
-        curves=curves,
-        edge_index=edge_index,
-        root_curve_indices=root_curve_indices,
-        curve_endpoints=curve_endpoints,
-        curve_geom=curve_geom,
-        edge_type=edge_type,
-        hop_dist=hop_dist,
-        target=target,
-        topo_hops=topo_hops,
-        topo_cable=topo_cable,
-    )
+    topo_idx = np.asarray(topo_edge_index, dtype=np.int64).reshape(n, 2)
+    n_topo = 1 + int(topo_idx.max()) if n else 1
 
-
-def _compute_hop_dist(n, edge_index):
-    """BFS all-pairs shortest paths on the line graph. int8 array, -1 = unreachable."""
-    dist = np.full((n, n), -1, dtype=np.int8)
-    np.fill_diagonal(dist, 0)
-    if n <= 1 or edge_index.shape[1] == 0:
-        return dist
-    adj = [[] for _ in range(n)]
-    for u, v in edge_index.T.tolist():
-        adj[u].append(v)
-    for src in range(n):
-        queue, seen, d = [src], {src}, 0
-        while queue:
-            nxt = []
-            for u in queue:
-                dist[src, u] = d
-                for v in adj[u]:
-                    if v not in seen:
-                        seen.add(v)
-                        nxt.append(v)
-            queue, d = nxt, d + 1
-    return dist
-
-
-def _compute_tree_geom(curves, curve_endpoints, n_topo):
-    """
-    Walk the tree from the root (at the origin) to place every topological
-    node and accumulate its hop count and cable distance from the root. A
-    curve's distal endpoint is its proximal endpoint plus the sum of its step
-    vectors. Curves are listed parent-first, so one pass suffices.
-
-    Returns
-    -------
-    curve_geom : numpy.ndarray
-        Shape (n, 7) float32: proximal xyz, distal xyz, cable length.
-    topo_hops, topo_cable : numpy.ndarray
-        Shape (n_topo,) float32.
-    """
+    # Walk parent-first: a curve's distal node is its proximal node plus the
+    # sum of its step vectors, one more hop, and its cable length further out.
+    # ancestors[v] marks v and every node on its path to the root.
     pos = np.zeros((n_topo, 3))
     hops = np.zeros(n_topo, dtype=np.float32)
     cable = np.zeros(n_topo, dtype=np.float32)
-    length = np.zeros((len(curves), 1), dtype=np.float32)
-    for k, (p, d) in enumerate(curve_endpoints):
+    ancestors = np.eye(n_topo, dtype=bool)
+    for k, (p, d) in enumerate(topo_idx):
         steps = np.asarray(curves[k], dtype=np.float64)
-        length[k] = np.linalg.norm(steps, axis=1).sum()
         pos[d] = pos[p] + steps.sum(axis=0)
         hops[d] = hops[p] + 1
-        cable[d] = cable[p] + length[k, 0]
-    geom = np.concatenate([pos[curve_endpoints[:, 0]], pos[curve_endpoints[:, 1]], length], axis=1)
-    return geom.astype(np.float32), hops, cable
+        cable[d] = cable[p] + np.linalg.norm(steps, axis=1).sum()
+        ancestors[d] |= ancestors[p]
+
+    # Tokens: the root, then each curve. Global arrays anchor at the proximal
+    # node; relative arrays anchor at the distal node, which is unique per curve.
+    proximal = np.concatenate([[0], topo_idx[:, 0]])
+    distal = np.concatenate([[0], topo_idx[:, 1]])
+    endpoints = np.stack([pos[proximal], pos[distal]], axis=1)
+
+    # Lowest common ancestor of each token pair: the deepest shared ancestor
+    anc = ancestors[distal]                                        # (T, n_topo)
+    common = anc[:, None, :] & anc[None, :, :]                     # (T, T, n_topo)
+    lca = (common * (hops + 1)).argmax(axis=-1)                    # (T, T)
+    up, down = hops[distal][:, None] - hops[lca], hops[distal][None, :] - hops[lca]
+    rel_hops = np.stack([up, down], axis=-1)
+    up, down = cable[distal][:, None] - cable[lca], cable[distal][None, :] - cable[lca]
+    rel_cable = np.stack([up, down], axis=-1)
+
+    return TreeSample(
+        curves=curves,
+        root_curve_indices=[k for k in range(n) if topo_idx[k, 0] == 0],
+        endpoints=endpoints.astype(np.float32),
+        hops=hops[proximal],
+        cable=cable[proximal],
+        rel_hops=rel_hops.astype(np.float32),
+        rel_cable=rel_cable.astype(np.float32),
+        target=target,
+    )
 
 
 class DatasetCollection(Dataset):
