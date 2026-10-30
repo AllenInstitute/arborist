@@ -4,12 +4,13 @@ Created on Mon June 8 17:00:00 2026
 @author: Anna Grim
 @email: anna.grim@alleninstitute.org
 
-...
+Curve and rooted-subgraph datasets over a SkeletonGraph, and the TreeSample
+container consumed by the Arborist model.
 
 """
 
-from collections import defaultdict
 from copy import deepcopy
+from dataclasses import dataclass
 from torch.utils.data import Dataset, DataLoader, Sampler
 
 import numpy as np
@@ -56,9 +57,9 @@ class CurveDataset(Dataset):
         if self.transform:
             curve = self.transform(curve)
 
-        # Normalize
+        # Normalize — backward pass avoids aliasing without a copy
         curve -= curve[0]
-        curve[1:] -= curve[:-1]
+        curve[-1:0:-1] -= curve[-2::-1]
         return curve
 
     # --- Helpers ---
@@ -93,11 +94,11 @@ class GraphDataset(Dataset):
     Each item corresponds to one root node. __getitem__ extracts the
     subgraph within "max_depth" microns, decomposes it into irreducible paths
     via topological decomposition, computes first-order finite differences for
-    each path, and returns a TreeSample with those curves and the line-graph
-    connectivity between them.
+    each path, and returns a TreeSample with those curves and their placement
+    relative to the root.
     """
 
-    def __init__(self, graph, root_nodes, max_depth=None, transform=None, graph_transform=None):
+    def __init__(self, graph, root_nodes, max_depth=None, graph_transform=None):
         """
         Instantiates a GraphDataset object.
 
@@ -109,9 +110,6 @@ class GraphDataset(Dataset):
             One root node per dataset item.
         max_depth : float
             Depth in microns for rooted subgraph extraction.
-        transform : callable, optional
-            Applied to each raw xyz array before differencing (e.g.
-            CurveTransforms for augmentation). Default is None.
         graph_transform : callable, optional
             Applied to the full (N_nodes, 3) node_xyz array of the rooted
             subgraph before path decomposition (e.g. GraphTransforms). Because
@@ -126,11 +124,9 @@ class GraphDataset(Dataset):
         self.graph = graph
         self.root_nodes = root_nodes
         self.max_depth = max_depth
-        self.transform = transform
         self.graph_transform = graph_transform
         self.config = {
             "max_depth": max_depth,
-            "transform": type(transform).__name__ if transform else None,
             "graph_transform": type(graph_transform).__name__ if graph_transform else None,
         }
 
@@ -143,19 +139,15 @@ class GraphDataset(Dataset):
             subgraph.node_xyz = self.graph_transform(subgraph.node_xyz)
         _, paths, topo_edge_index = topological_decomposition(subgraph)
 
-        # Create list of curves
+        # Translate and difference each curve
         curves = []
         for path in paths:
             xyz = subgraph.node_xyz[path].copy()
-            if self.transform:
-                xyz = self.transform(xyz)
             xyz -= xyz[0]
-            xyz[1:] -= xyz[:-1].copy()
+            xyz[-1:0:-1] -= xyz[-2::-1]
             curves.append(xyz)
 
-        # Create TreeSample
-        edge_index = _build_line_graph_edge_index(topo_edge_index)
-        return TreeSample(curves=curves, edge_index=edge_index)
+        return build_tree_sample(curves, topo_edge_index)
 
     def __len__(self):
         return len(self.root_nodes)
@@ -172,9 +164,17 @@ class GraphDataset(Dataset):
         write_json(path, self.config)
 
 
+@dataclass(repr=False)
 class TreeSample:
     """
     A rooted subgraph ready to pass through CurveEncoder then GraphTransformer.
+    Construct via ``build_tree_sample``.
+
+    The curves themselves are translation invariant; the positional arrays
+    say where each curve sits relative to the root and to every other curve
+    and feed the positional encodings (see arborist.models.positional_encoding).
+    They are indexed by token: token 0 is the root and ``curves[k]`` is token
+    ``k + 1``, with T = n_curves + 1 tokens in all.
 
     Attributes
     ----------
@@ -182,62 +182,121 @@ class TreeSample:
         One array per irreducible path, each of shape (N_i, 3). Values are
         first-order finite differences with a leading zero row, matching the
         convention expected by CurveEncoder.
-    edge_index : numpy.ndarray
-        Shape (2, E), dtype int64. Line-graph adjacency: two curves share an
-        edge when they meet at a topological node (branch point or leaf),
-        so message passing over this graph communicates between neighboring
-        branches.
+    root_curve_indices : List[int]
+        Indices into ``curves`` of the curves adjacent to the root.
+    endpoints : numpy.ndarray
+        Shape (T, 2, 3) float32. Proximal and distal endpoint xyz of each
+        token in the subgraph frame with the root at the origin; proximal is
+        the endpoint closer to the root. Both are the origin for the root.
+    hops : numpy.ndarray
+        Shape (T,) float32. Number of curves on the path from the root to
+        each token's proximal endpoint (branch order).
+    cable : numpy.ndarray
+        Shape (T,) float32. Cable length (microns) along the path from the
+        root to each token's proximal endpoint.
+    rel_hops : numpy.ndarray
+        Shape (T, T, 2) float32. For tokens (i, j), anchored at their distal
+        endpoints: curves from i up to the lowest common ancestor, then down
+        to j. rel_hops[j, i] is rel_hops[i, j] reversed.
+    rel_cable : numpy.ndarray
+        Shape (T, T, 2) float32. Cable length (microns) along the same
+        upstream and downstream path segments.
+    target : any, optional
+        Supervised label for this sample (scalar, array, or dict). Stored
+        alongside the sample so DataLoader batches can be self-contained.
     """
 
-    def __init__(self, curves, edge_index, root_curve_indices=None):
-        self.curves = curves
-        self.edge_index = edge_index
-        self.root_curve_indices = root_curve_indices
+    curves: list
+    root_curve_indices: list
+    endpoints: np.ndarray
+    hops: np.ndarray
+    cable: np.ndarray
+    rel_hops: np.ndarray
+    rel_cable: np.ndarray
+    target: object = None
 
     def __repr__(self):
-        return (
-            f"TreeSample("
-            f"n_curves={len(self.curves)}, "
-            f"n_edges={self.edge_index.shape[1]})"
-        )
+        return f"TreeSample(n_curves={len(self.curves)})"
 
 
-def _build_line_graph_edge_index(topo_edge_index):
+def build_tree_sample(curves, topo_edge_index, target=None):
     """
-    Converts topological-graph edge pairs into line-graph edge pairs.
+    Build a fully-annotated TreeSample from preprocessed curves and topology.
 
-    In the topological graph each node is a branching/leaf point and each
-    edge is an irreducible path (a curve). In the line graph each curve
-    becomes a node and two curve-nodes are connected when they share a
-    topological endpoint.
+    Walks the tree once to place every curve's endpoints in the root frame and
+    accumulate hop count and cable length from the root, then derives the
+    pairwise (upstream, downstream) hops and cable between tokens from their
+    lowest common ancestors, so model forward passes skip all Python-side
+    computation. All callers that construct TreeSamples should go through
+    this factory to stay consistent.
 
     Parameters
     ----------
+    curves : List[numpy.ndarray]
+        Finite-difference curve arrays (already translated and differenced),
+        each of shape (N_i, 3).
     topo_edge_index : List[Tuple[int, int]]
-        Edges of the topological graph as (src_topo_idx, dst_topo_idx) pairs,
-        parallel to the list of curves.
+        Topological graph edges, one per curve, as (proximal, distal) pairs
+        with node 0 the root and every curve listed after its parent, as
+        produced by ``topological_decomposition``.
+    target : any, optional
+        Supervised label to embed in the sample.
 
     Returns
     -------
-    numpy.ndarray
-        Shape (2, E), int64.
+    TreeSample
     """
-    topo_to_curves = defaultdict(list)
-    for curve_idx, (u, v) in enumerate(topo_edge_index):
-        topo_to_curves[u].append(curve_idx)
-        topo_to_curves[v].append(curve_idx)
+    n = len(curves)
+    topo_idx = np.asarray(topo_edge_index, dtype=np.int64).reshape(n, 2)
+    n_topo = 1 + int(topo_idx.max()) if n else 1
 
-    src, dst = [], []
-    for neighbors in topo_to_curves.values():
-        for i in neighbors:
-            for j in neighbors:
-                if i != j:
-                    src.append(i)
-                    dst.append(j)
+    # Walk parent-first: a curve's distal node is its proximal node plus the
+    # sum of its step vectors, one more hop, and its cable length further out.
+    # ancestors[v] marks v and every node on its path to the root.
+    pos = np.zeros((n_topo, 3))
+    hops = np.zeros(n_topo, dtype=np.float32)
+    cable = np.zeros(n_topo, dtype=np.float32)
+    ancestors = np.eye(n_topo, dtype=bool)
+    visited = np.zeros(n_topo, dtype=bool)
+    visited[0] = True
+    for k, (p, d) in enumerate(topo_idx):
+        if not visited[p] or visited[d]:
+            raise ValueError(
+                f"topo_edge_index must list (proximal, distal) edges parent-first "
+                f"from root 0; curve {k} = ({p}, {d}) violates this"
+            )
+        visited[d] = True
+        steps = np.asarray(curves[k], dtype=np.float64)
+        pos[d] = pos[p] + steps.sum(axis=0)
+        hops[d] = hops[p] + 1
+        cable[d] = cable[p] + np.linalg.norm(steps, axis=1).sum()
+        ancestors[d] |= ancestors[p]
 
-    if not src:
-        return np.zeros((2, 0), dtype=np.int64)
-    return np.array([src, dst], dtype=np.int64)
+    # Tokens: the root, then each curve. Global arrays anchor at the proximal
+    # node; relative arrays anchor at the distal node, which is unique per curve.
+    proximal = np.concatenate([[0], topo_idx[:, 0]])
+    distal = np.concatenate([[0], topo_idx[:, 1]])
+    endpoints = np.stack([pos[proximal], pos[distal]], axis=1)
+
+    # Lowest common ancestor of each token pair: the deepest shared ancestor
+    anc = ancestors[distal]                                        # (T, n_topo)
+    common = anc[:, None, :] & anc[None, :, :]                     # (T, T, n_topo)
+    lca = (common * (hops + 1)).argmax(axis=-1)                    # (T, T)
+    up, down = hops[distal][:, None] - hops[lca], hops[distal][None, :] - hops[lca]
+    rel_hops = np.stack([up, down], axis=-1)
+    up, down = cable[distal][:, None] - cable[lca], cable[distal][None, :] - cable[lca]
+    rel_cable = np.stack([up, down], axis=-1)
+
+    return TreeSample(
+        curves=curves,
+        root_curve_indices=[k for k in range(n) if topo_idx[k, 0] == 0],
+        endpoints=endpoints.astype(np.float32),
+        hops=hops[proximal],
+        cable=cable[proximal],
+        rel_hops=rel_hops.astype(np.float32),
+        rel_cable=rel_cable.astype(np.float32),
+        target=target,
+    )
 
 
 class DatasetCollection(Dataset):
@@ -297,7 +356,14 @@ class DatasetCollection(Dataset):
         for i in idxs:
             ds_idx = self.index["ds_idx"][i]
             item_idx = self.index["item_idx"][i]
-            examples.append(self.datasets[ds_idx][item_idx])
+            ds = self.datasets[ds_idx]
+            # Suppress augmentation so val items are fixed and unaugmented
+            orig = ds.__dict__.get("graph_transform")
+            if orig is not None:
+                ds.__dict__["graph_transform"] = None
+            examples.append(ds[item_idx])
+            if orig is not None:
+                ds.__dict__["graph_transform"] = orig
         return examples
 
     def __getitem__(self, i):
@@ -368,7 +434,7 @@ class CurveSampler(Sampler):
         return self.examples_per_epoch
 
 
-def collate_curves(curves):
+def collate_curves(curves, min_len=1, device=None):
     """
     Pads a list of curves to the longest in the batch and generates an
     attention mask.
@@ -377,6 +443,10 @@ def collate_curves(curves):
     ----------
     curves : List[numpy.ndarray]
         Each of shape (N_i, 3), where N_i can vary.
+    min_len : int, optional
+        Minimum padded length, e.g. CurveEncoder's segment_len. Default is 1.
+    device : torch.device, optional
+        Device for the returned tensors. Default is None (CPU).
 
     Returns
     -------
@@ -386,13 +456,13 @@ def collate_curves(curves):
         Shape (B, N_max), True where padding.
     """
     lengths = [len(c) for c in curves]
-    n_max = max(lengths)
+    n_max = max(max(lengths), min_len)
     B = len(curves)
 
-    padded = torch.zeros(B, n_max, 3)
-    mask = torch.ones(B, n_max, dtype=torch.bool)
+    padded = torch.zeros(B, n_max, 3, device=device)
+    mask = torch.ones(B, n_max, dtype=torch.bool, device=device)
     for i, (c, l) in enumerate(zip(curves, lengths)):
-        padded[i, :l] = torch.tensor(c)
+        padded[i, :l] = torch.as_tensor(c, dtype=torch.float32, device=device)
         mask[i, :l] = False
     return padded, mask
 
@@ -405,12 +475,12 @@ def build_dataloader(
     use_sampler=True,
 ):
     """
-    Builds a DataLoader for a PathsDatasetCollection that samples with respect
+    Builds a DataLoader for a DatasetCollection that samples with respect
     to curve length.
 
     Parameters
     ----------
-    dataset : PathsDatasetCollection
+    dataset : DatasetCollection
         Dataset to input to dataloader.
     batch_size : int, optional
         Number of curves per batch. Default is 32.
@@ -435,4 +505,50 @@ def build_dataloader(
         num_workers=num_workers,
         pin_memory=True,
         sampler=sampler,
+    )
+
+
+def collate_trees(samples):
+    """
+    Collate a list of TreeSamples into a batch.
+
+    Trees vary in the number of curves, so they cannot be naively stacked.
+    The samples are returned as a plain list; targets, when present, are
+    stacked into a float tensor. The model is expected to loop over the list
+    and accumulate gradients across the batch.
+
+    Returns
+    -------
+    samples : List[TreeSample]
+    targets : torch.Tensor or None
+        Shape (B,) or (B, ...) if all samples carry a target, else None.
+    """
+    targets = None
+    if samples[0].target is not None:
+        targets = torch.stack([
+            torch.as_tensor(s.target, dtype=torch.float32) for s in samples
+        ])
+    return samples, targets
+
+
+def build_graph_dataloader(dataset, batch_size=4, num_workers=0, shuffle=True):
+    """
+    DataLoader for GraphDataset — each batch is (list[TreeSample], targets).
+
+    Parameters
+    ----------
+    dataset : GraphDataset
+    batch_size : int, optional
+        Default is 4.
+    num_workers : int, optional
+        Default is 0.
+    shuffle : bool, optional
+        Default is True.
+    """
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        collate_fn=collate_trees,
+        num_workers=num_workers,
+        shuffle=shuffle,
     )

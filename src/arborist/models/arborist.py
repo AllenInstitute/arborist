@@ -8,10 +8,10 @@ End-to-end ArboristModel for neuron morphology encoding.
 
 """
 
-import json
 import torch
 import torch.nn as nn
 
+from arborist.data.datasets import collate_curves
 from arborist.models.curve_transformer import CurveEncoder
 from arborist.models.graph_transformer import GraphTransformer
 
@@ -21,10 +21,12 @@ class Arborist(nn.Module):
     End-to-end neuron morphology encoder.
 
     Encodes a TreeSample in three stages:
-      1. CurveEncoder   — each irreducible path → latent vector z_i
-      2. GraphTransformer — message-pass over the line graph of the skeleton
-                           so each curve sees its neighboring branches
-      3. Readout      — average over all curve embeddings → global tree z
+      1. CurveEncoder   — each irreducible path → latent vector z_i (shape
+                          only; translation-invariant)
+      2. GraphTransformer — attention across all curves of the subgraph, with
+                           each curve's placement and distance from the root
+                           added as a global PE
+      3. Readout      — CLS token output → global tree z
 
     Parameters
     ----------
@@ -49,6 +51,9 @@ class Arborist(nn.Module):
         Default is 64.
     dropout : float, optional
         Dropout probability shared across both sub-models. Default is 0.1.
+    geom_scale : float, optional
+        Reference length r0 (microns) for log compression in the positional
+        encoding; see GlobalPE. Default is 10.0.
     """
 
     def __init__(
@@ -63,6 +68,7 @@ class Arborist(nn.Module):
         graph_d_ff=128,
         latent_dim=64,
         dropout=0.1,
+        geom_scale=10.0,
     ):
         super().__init__()
         self.config = {
@@ -76,6 +82,7 @@ class Arborist(nn.Module):
             "graph_d_ff": graph_d_ff,
             "latent_dim": latent_dim,
             "dropout": dropout,
+            "geom_scale": geom_scale,
         }
         self.curve_encoder = CurveEncoder(
             segment_len=curve_segment_len,
@@ -92,19 +99,9 @@ class Arborist(nn.Module):
             n_layers=graph_n_layers,
             d_ff=graph_d_ff,
             dropout=dropout,
+            geom_scale=geom_scale,
         )
-
-    def _collate_curves(self, curves):
-        device = next(self.parameters()).device
-        lengths = [len(c) for c in curves]
-        n_max = max(max(lengths), self.curve_encoder.segment_len)
-        B = len(curves)
-        diffs = torch.zeros(B, n_max, 3, device=device)
-        mask = torch.ones(B, n_max, dtype=torch.bool, device=device)
-        for i, (c, l) in enumerate(zip(curves, lengths)):
-            diffs[i, :l] = torch.as_tensor(c, dtype=torch.float32, device=device)
-            mask[i, :l] = False
-        return diffs, mask
+        self.cls_token = nn.Parameter(torch.zeros(latent_dim))
 
     @torch._dynamo.disable
     def encode(self, sample):
@@ -119,8 +116,8 @@ class Arborist(nn.Module):
         Returns
         -------
         z_tree : torch.Tensor
-            Shape (latent_dim,) — global tree embedding, mean-pooled over
-            all curve embeddings after graph contextualization.
+            Shape (latent_dim,) — global tree embedding from the CLS token
+            after graph contextualization.
         z_curves : torch.Tensor
             Shape (n_curves, latent_dim) — per-curve embeddings after the
             GraphTransformer contextualizes each curve by its neighbors.
@@ -131,16 +128,29 @@ class Arborist(nn.Module):
             empty = torch.zeros(self.config["latent_dim"], device=device)
             return empty, empty.unsqueeze(0)
 
-        # Encode curves
-        diffs, mask = self._collate_curves(sample.curves)
+        # Embed each curve independently via the sequence transformer
+        diffs, mask = collate_curves(
+            sample.curves, min_len=self.curve_encoder.segment_len, device=device
+        )
         z, _ = self.curve_encoder(diffs, mask)
 
-        # Encode graph
-        edge_index = torch.as_tensor(
-            sample.edge_index, dtype=torch.long, device=device
+        # Prepend the CLS token as token 0 (the root), matching the token
+        # order of the sample's positional arrays
+        def t(x):
+            return torch.as_tensor(x, dtype=torch.float32, device=device)
+
+        z_out = self.graph_transformer(
+            torch.cat([self.cls_token.unsqueeze(0), z], dim=0),
+            endpoints=t(sample.endpoints),
+            hops=t(sample.hops),
+            cable=t(sample.cable),
+            rel_hops=t(sample.rel_hops),
+            rel_cable=t(sample.rel_cable),
         )
-        z_curves = self.graph_transformer(z, edge_index)
-        z_tree = z_curves.mean(dim=0)
+
+        # CLS token output is the global tree embedding; remaining nodes are per-curve
+        z_tree = z_out[0]
+        z_curves = z_out[1:]
         return z_tree, z_curves
 
     def forward(self, sample):
@@ -152,8 +162,8 @@ class Arborist(nn.Module):
         )
 
     @classmethod
-    def load(cls, path):
-        checkpoint = torch.load(path)
+    def load(cls, path, map_location=None):
+        checkpoint = torch.load(path, map_location=map_location, weights_only=True)
         model = cls(**checkpoint["config"])
         model.load_state_dict(checkpoint["state_dict"])
         return model
