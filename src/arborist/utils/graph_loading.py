@@ -91,12 +91,12 @@ class GraphLoader:
                 )
                 results = executor.map(self.load, swc_dicts, chunksize=chunksize)
                 for result in results:
-                    if pbar:
+                    if pbar is not None:
                         pbar.update(1)
                     if result:
                         yield result
                 del swc_dicts, results
-            if pbar:
+            if pbar is not None:
                 pbar.close()
 
     def raw_cable_length(self, swc_dict):
