@@ -58,28 +58,46 @@ class GraphLoader:
             Each dict has keys ``"swc_id"``, ``"nodes"``, ``"edges"``,
             ``"is_soma"``.
         """
-        swc_dicts = self.swc_reader(swc_pointer)
+        return deque(self.iter_irreducibles(swc_pointer))
 
-        # Most SWCs are far below min_cable_length; the raw path length is an
-        # upper bound on the cable length that "load" computes (pruning only
-        # removes edges), so they can be dropped before being dispatched.
-        swc_dicts = [
-            d for d in swc_dicts
-            if self.raw_cable_length(d) >= self.min_cable_length
-        ]
+    def iter_irreducibles(self, swc_pointer):
+        """
+        Generator version of "__call__" that reads, filters, and processes
+        SWCs one batch at a time, so only a single batch of parsed SWCs is
+        in memory at once.
 
-        # One task per SWC spends more on pickling and IPC than on the work
-        # itself (~1 ms per SWC), so SWCs are dispatched in chunks.
-        irreducibles = deque()
+        Parameters
+        ----------
+        swc_pointer : str
+            Path to SWC files (local directory, ZIP, or cloud prefix).
+
+        Yields
+        ------
+        dict
+            Irreducible component, see "__call__".
+        """
         with ProcessPoolExecutor() as executor:
-            chunksize = max(1, min(256, len(swc_dicts) // (8 * executor._max_workers)))
-            results = executor.map(self.load, swc_dicts, chunksize=chunksize)
-            if self.verbose:
-                results = tqdm(results, total=len(swc_dicts), desc="Load Graphs")
-            for result in results:
-                if result:
-                    irreducibles.append(result)
-        return irreducibles
+            pbar = tqdm(desc="Load Graphs") if self.verbose else None
+            for swc_dicts in self.swc_reader.iter_batches(swc_pointer):
+                # Raw cable length upper-bounds the loaded length, so drop early
+                swc_dicts = [
+                    d for d in swc_dicts
+                    if self.raw_cable_length(d) >= self.min_cable_length
+                ]
+
+                # Chunk tasks; per-SWC pickling/IPC costs more than the work
+                chunksize = max(
+                    1, min(256, len(swc_dicts) // (8 * executor._max_workers))
+                )
+                results = executor.map(self.load, swc_dicts, chunksize=chunksize)
+                for result in results:
+                    if pbar:
+                        pbar.update(1)
+                    if result:
+                        yield result
+                del swc_dicts, results
+            if pbar:
+                pbar.close()
 
     def raw_cable_length(self, swc_dict):
         """

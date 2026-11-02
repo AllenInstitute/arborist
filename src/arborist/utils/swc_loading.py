@@ -142,6 +142,57 @@ class Reader:
 
         raise ValueError(f"Unrecognised swc_pointer: {swc_pointer!r}")
 
+    def iter_batches(self, swc_pointer, batch_size=50000, zip_batch_size=8):
+        """
+        Same inputs as "__call__", but yields the SWC dicts in batches so
+        that only one batch is held in memory at a time.
+
+        Parameters
+        ----------
+        swc_pointer : str or List[str]
+            See "__call__".
+        batch_size : int, optional
+            Number of SWC files read per batch. Default is 50000.
+        zip_batch_size : int, optional
+            Number of ZIP archives read per batch. Default is 8.
+
+        Yields
+        ------
+        Deque[dict]
+            Batch of SWC dicts, see "__call__".
+        """
+        swc_paths, zip_paths, read_fn = list(), list(), None
+        if isinstance(swc_pointer, list):
+            swc_paths = swc_pointer
+        elif isinstance(swc_pointer, str) and os.path.isdir(swc_pointer):
+            zip_paths = util.list_paths(swc_pointer, extension=".zip")
+            swc_paths = util.list_paths(swc_pointer, extension=".swc")
+            read_fn = self.read_zip
+            if not (zip_paths or swc_paths):
+                raise ValueError(f"No SWC or ZIP files found in {swc_pointer}")
+        elif isinstance(swc_pointer, str) and (
+            util.is_gcs_path(swc_pointer) or util.is_s3_path(swc_pointer)
+        ):
+            swc_paths = util.list_paths(swc_pointer, extension=".swc")
+            if not swc_paths:
+                zip_paths = util.list_paths(swc_pointer, extension=".zip")
+            read_fn = (
+                self._read_s3_zip
+                if util.is_s3_path(swc_pointer)
+                else self._read_gcs_zip
+            )
+        else:
+            yield self(swc_pointer)
+            return
+
+        # ZIPs take priority over loose SWCs, matching "__call__"
+        if zip_paths:
+            for i in range(0, len(zip_paths), zip_batch_size):
+                yield self.read_zips(zip_paths[i : i + zip_batch_size], read_fn)
+        else:
+            for i in range(0, len(swc_paths), batch_size):
+                yield self.read_swcs(swc_paths[i : i + batch_size])
+
     def read_swc(self, path):
         """
         Reads a single SWC file.
