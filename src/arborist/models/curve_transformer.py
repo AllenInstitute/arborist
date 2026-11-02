@@ -4,6 +4,12 @@ Created on Wed June 10 12:00:00 2026
 @author: Anna Grim
 @email: anna.grim@alleninstitute.org
 
+Curve autoencoder for 3D neuron paths. A transformer encoder tokenizes a curve
+into fixed-length segments of finite differences (plus a class token) and maps
+it to a single latent vector. An autoregressive LSTM decoder reconstructs the
+curve segment by segment from that latent, the arc position, and the previous
+segment's prediction.
+
 """
 
 import json
@@ -14,9 +20,9 @@ import torch.nn as nn
 class CurveEncoder(nn.Module):
     """
     Transformer encoder that maps 3D finite differences to a latent vector.
-     Curves are tokenized into fixed-length segments plus a class token, with
-      each segment encoding flattened finite differences and normalized arc-
-      length position.
+    Curves are tokenized into fixed-length segments plus a class token, with
+    each segment encoding flattened finite differences and normalized arc-
+    length position.
     """
 
     def __init__(
@@ -129,119 +135,7 @@ class CurveEncoder(nn.Module):
         return z, tokens
 
 
-class AutoregressiveINRDecoder(nn.Module):
-    """
-    Autoregressive implicit neural representation decoder. At each step,
-    predicts the i-th segment's differences conditioned on the global latent
-    z, arc position t_i, and previous segment's predicted diffs T_{i-1}.
-
-        T_i = F(z, t_i | T_{i-1})
-
-    The GRU hidden state carries long-range context from all previous
-    segments, while T_{i-1} provides an explicit local continuity signal.
-    """
-
-    def __init__(
-        self,
-        segment_len=10,
-        latent_dim=32,
-        d_hidden=256,
-        n_layers=4,
-        n_frequencies=16,
-        dropout=0.1,
-    ):
-        """
-        Instantiates a AutoregressiveINRDecoder object.
-
-        Parameters
-        ----------
-        segment_len : int
-            Number of points per segment.
-        latent_dim : int
-            Dimension of the input latent vector z.
-        d_hidden : int
-            GRU hidden dimension.
-        n_layers : int
-            Number of GRU layers.
-        n_frequencies : int
-            Number of Fourier frequency bands for positional encoding of t.
-        dropout : float
-            Dropout probability.
-        """
-        # Call parent class
-        super().__init__()
-
-        # Instance attributes
-        self.latent_proj = nn.Linear(latent_dim, d_hidden)
-        self.n_frequencies = n_frequencies
-        self.segment_len = segment_len
-
-        # Input at each step: [T_{i-1} | pe(t_i) | z]
-        d_seg = segment_len * 3
-        d_input = d_seg + 1 + latent_dim
-        self.gru = nn.GRU(
-            input_size=d_input,
-            hidden_size=d_hidden,
-            num_layers=n_layers,
-            batch_first=True,
-            dropout=dropout if n_layers > 1 else 0,
-        )
-        self.output_proj = nn.Sequential(
-            nn.LayerNorm(d_hidden),
-            nn.Linear(d_hidden, d_seg),
-        )
-
-    def forward(self, z, n_segments=None):
-        """
-        Parameters
-        ----------
-        z : torch.Tensor
-            Latent vector of shape (B, latent_dim).
-        n_segments : int, optional
-            Number of output segments to decode.
-
-        Returns
-        -------
-        torch.Tensor
-            Predicted finite differences.
-        """
-        B = z.shape[0]
-        n_segments = n_segments or 10
-        d_seg = self.segment_len * 3
-
-        # Seed hidden state from z: (n_layers, B, d_hidden)
-        h = (
-            self.latent_proj(z)
-            .unsqueeze(0)
-            .expand(self.gru.num_layers, -1, -1)
-            .contiguous()
-        )
-
-        # Arc positions and Fourier encodings: (n_segments, 2 * n_freq)
-        t = torch.linspace(0, 1, n_segments, device=z.device)
-        pe = t.unsqueeze(-1)
-
-        # Autoregressive loop
-        outputs = []
-        T_prev = torch.zeros(B, d_seg, device=z.device)
-        for s in range(n_segments):
-            # Create GRU input
-            pe_s = pe[s].unsqueeze(0).expand(B, -1)
-            x_s = torch.cat([T_prev, pe_s, z], dim=-1).unsqueeze(1)
-
-            # Predict next token and update hidden state
-            out, h = self.gru(x_s, h)
-            T_i = self.output_proj(out.squeeze(1))
-
-            # Update previous token
-            outputs.append(T_i)
-            T_prev = T_i
-
-        out = torch.stack(outputs, dim=1)
-        return out.reshape(B, n_segments * self.segment_len, 3)
-
-
-class AutoregressiveINRLSTMDecoder(nn.Module):
+class AutoregressiveLSTMDecoder(nn.Module):
     """
     Autoregressive implicit neural representation decoder using an LSTM. At
     each step, predicts the i-th segment's differences conditioned on the
@@ -356,7 +250,6 @@ class CurveAutoencoder(nn.Module):
         d_ff=256,
         latent_dim=32,
         dropout=0.1,
-        decoder_type="gru",
     ):
         # Call parent class
         super().__init__()
@@ -370,7 +263,6 @@ class CurveAutoencoder(nn.Module):
             "d_ff": d_ff,
             "latent_dim": latent_dim,
             "dropout": dropout,
-            "decoder_type": decoder_type,
         }
 
         # Architecture
@@ -383,12 +275,7 @@ class CurveAutoencoder(nn.Module):
             latent_dim=latent_dim,
             dropout=dropout,
         )
-        decoder_cls = (
-            AutoregressiveINRLSTMDecoder
-            if decoder_type == "lstm"
-            else AutoregressiveINRDecoder
-        )
-        self.decoder = decoder_cls(
+        self.decoder = AutoregressiveLSTMDecoder(
             segment_len=segment_len,
             latent_dim=latent_dim,
             d_hidden=256,
@@ -429,6 +316,8 @@ class CurveAutoencoder(nn.Module):
     @classmethod
     def load(cls, path, map_location=None):
         checkpoint = torch.load(path, map_location=map_location, weights_only=True)
-        model = cls(**checkpoint["config"])
+        config = dict(checkpoint["config"])
+        config.pop("decoder_type", None)
+        model = cls(**config)
         model.load_state_dict(checkpoint["state_dict"])
         return model
