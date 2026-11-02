@@ -459,12 +459,14 @@ def collate_curves(curves, min_len=1, device=None):
     n_max = max(max(lengths), min_len)
     B = len(curves)
 
-    padded = torch.zeros(B, n_max, 3, device=device)
-    mask = torch.ones(B, n_max, dtype=torch.bool, device=device)
+    # Pad on the host and move once: a copy per curve would each wait for
+    # the work already queued on the device.
+    padded = np.zeros((B, n_max, 3), dtype=np.float32)
+    mask = np.ones((B, n_max), dtype=bool)
     for i, (c, l) in enumerate(zip(curves, lengths)):
-        padded[i, :l] = torch.as_tensor(c, dtype=torch.float32, device=device)
+        padded[i, :l] = c
         mask[i, :l] = False
-    return padded, mask
+    return torch.from_numpy(padded).to(device), torch.from_numpy(mask).to(device)
 
 
 def build_dataloader(
