@@ -134,15 +134,15 @@ class Reader:
 
         # Case 3: Path to...
         if isinstance(swc_pointer, str):
-            # Case 3.1: GCS/S3 prefix
+            # Case 3a: GCS/S3 prefix
             if util.is_gcs_path(swc_pointer) or util.is_s3_path(swc_pointer):
                 return self._read_from_cloud(swc_pointer)
 
-            # Case 3.2: ZIP archive
+            # Case 3b: ZIP archive
             if swc_pointer.endswith(".zip"):
                 return self.read_zip(swc_pointer)
 
-            # Case 3.3: SWC file
+            # Case 3c: SWC file
             if swc_pointer.endswith(".swc"):
                 result = self.read_swc(swc_pointer)
                 return deque([result] if result else [])
@@ -417,7 +417,6 @@ class Reader:
             swc_dict["radius"] /= 1000
 
         # Raw cable length upper-bounds the length of the loaded graph
-        # (pruning only removes edges), so short SWCs can be dropped here
         if raw_cable_length(swc_dict) < self.min_cable_length:
             return None
         return swc_dict
