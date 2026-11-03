@@ -99,54 +99,25 @@ class SkeletonGraph(rx.PyGraph):
         swc_pointer : str
             Path to SWC files (local directory, ZIP, or cloud prefix).
         """
-        # Arrays grow as components stream in, avoiding a full irreducibles list
-        self.node_component_id = np.zeros((0,), dtype=int)
-        self.node_xyz = np.zeros((0, 3), dtype=np.float32)
+        irreducibles = self.graph_loader(swc_pointer)
+
+        # Create node-level attribute arrays
+        num_nodes = count_nodes(irreducibles)
+        self.node_component_id = np.zeros((num_nodes,), dtype=int)
+        self.node_xyz = np.zeros((num_nodes, 3), dtype=np.float32)
         self.node_feats = {
-            "radius": np.zeros((0,), dtype=np.float16),
-            "type": np.zeros((0,), dtype=np.int8),
+            "radius": np.zeros((num_nodes,), dtype=np.float16),
+            "type": np.zeros((num_nodes,), dtype=np.int8),
         }
 
+        # Add connected components to graph
         component_id = 0
-        for irreducibles in self.graph_loader.iter_irreducibles(swc_pointer):
-            self._reserve_nodes(count_nodes([irreducibles]))
-            self.add_connected_component(irreducibles, component_id)
+        while irreducibles:
+            self.add_connected_component(irreducibles.pop(), component_id)
             component_id += 1
-        self._trim_node_arrays()
 
         self.check_swc_ids()
         self.set_kdtree()
-
-    def _reserve_nodes(self, n):
-        """
-        Ensures the node attribute arrays have room for "n" more nodes,
-        growing geometrically to keep copying amortized.
-        """
-        needed = self.num_nodes() + n
-        capacity = len(self.node_xyz)
-        if needed <= capacity:
-            return
-        new_capacity = max(needed, int(1.5 * capacity) + 1024)
-        self.node_component_id = self._grown(self.node_component_id, new_capacity)
-        self.node_xyz = self._grown(self.node_xyz, new_capacity)
-        for key, values in self.node_feats.items():
-            self.node_feats[key] = self._grown(values, new_capacity)
-
-    def _trim_node_arrays(self):
-        """
-        Drops unused capacity from the node attribute arrays.
-        """
-        n = self.num_nodes()
-        self.node_component_id = self.node_component_id[:n].copy()
-        self.node_xyz = self.node_xyz[:n].copy()
-        for key, values in self.node_feats.items():
-            self.node_feats[key] = values[:n].copy()
-
-    @staticmethod
-    def _grown(arr, new_len):
-        out = np.zeros((new_len,) + arr.shape[1:], dtype=arr.dtype)
-        out[: len(arr)] = arr
-        return out
 
     # --- Build Graph ---
     def add_connected_component(self, irreducibles, component_id):
