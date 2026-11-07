@@ -16,8 +16,8 @@ import json
 import torch
 import torch.nn as nn
 
-# Decoder output size per step: 4 pts = 20um at a node spacing of 5um
-PTS_PER_STEP = 4
+# Decoder output size per step: 8 pts = 40um at a node spacing of 5um
+PTS_PER_STEP = 8
 
 
 class CurveEncoder(nn.Module):
