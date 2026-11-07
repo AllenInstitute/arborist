@@ -49,7 +49,9 @@ class Reader:
 
     gcs_client = None
 
-    def __init__(self, anisotropy=(1.0, 1.0, 1.0), verbose=True):
+    def __init__(
+        self, anisotropy=(1.0, 1.0, 1.0), min_cable_length=0.0, verbose=True
+    ):
         """
         Initializes a Reader object that reads SWC files.
 
@@ -58,10 +60,14 @@ class Reader:
         swc_names : Set[str], optional
             Only SWC files with names in this set are loaded if provided.
             Otherwise, all SWC files are loaded. Default is an empty set.
+        min_cable_length : float, optional
+            SWC files whose raw cable length is below this value are dropped
+            while parsing, so they are never held in memory. Default is 0.
         verbose : bool, optional
             Indication of whether to display a progress bar. Default is True.
         """
         self.anisotropy = anisotropy
+        self.min_cable_length = min_cable_length
         self.verbose = verbose
 
     @classmethod
@@ -128,17 +134,18 @@ class Reader:
 
         # Case 3: Path to...
         if isinstance(swc_pointer, str):
-            # Case 3.1: GCS/S3 prefix
+            # Case 3a: GCS/S3 prefix
             if util.is_gcs_path(swc_pointer) or util.is_s3_path(swc_pointer):
                 return self._read_from_cloud(swc_pointer)
 
-            # Case 3.2: ZIP archive
+            # Case 3b: ZIP archive
             if swc_pointer.endswith(".zip"):
                 return self.read_zip(swc_pointer)
 
-            # Case 3.3: SWC file
+            # Case 3c: SWC file
             if swc_pointer.endswith(".swc"):
-                return deque([self.read_swc(swc_pointer)])
+                result = self.read_swc(swc_pointer)
+                return deque([result] if result else [])
 
         raise ValueError(f"Unrecognised swc_pointer: {swc_pointer!r}")
 
@@ -408,6 +415,10 @@ class Reader:
                 swc_dict["soma_nodes"].add(parts[0])
         if swc_dict["radius"][0] > 100:
             swc_dict["radius"] /= 1000
+
+        # Raw cable length upper-bounds the length of the loaded graph
+        if raw_cable_length(swc_dict) < self.min_cable_length:
+            return None
         return swc_dict
 
     # --- Helpers ---
@@ -547,3 +558,25 @@ def to_zipped_point(zf, filename, xyz, color=None, radius=5):
         x, y, z = tuple(xyz)
         buf.write(f"\n1 5 {x} {y} {z} {radius} -1")
         zf.writestr(filename, buf.getvalue())
+
+
+def raw_cable_length(swc_dict):
+    """
+    Sums the edge lengths of an SWC file as written, without building a
+    graph.
+
+    Parameters
+    ----------
+    swc_dict : dict
+        Parsed contents of one SWC file.
+
+    Returns
+    -------
+    float
+    """
+    ids, pids, xyz = swc_dict["id"], swc_dict["pid"], swc_dict["xyz"]
+    order = np.argsort(ids)
+    parent = order[np.clip(np.searchsorted(ids[order], pids), 0, len(ids) - 1)]
+    has_parent = ids[parent] == pids
+    edges = xyz[has_parent] - xyz[parent[has_parent]]
+    return float(np.linalg.norm(edges, axis=1).sum())

@@ -39,7 +39,9 @@ class GraphLoader:
         self.node_spacing = node_spacing
         self.prefetch = prefetch
         self.prune_depth = prune_depth
-        self.swc_reader = swc_util.Reader(anisotropy, verbose)
+        self.swc_reader = swc_util.Reader(
+            anisotropy, min_cable_length=min_cable_length, verbose=verbose
+        )
         self.verbose = verbose
 
     def __call__(self, swc_pointer):
@@ -60,14 +62,6 @@ class GraphLoader:
         """
         swc_dicts = self.swc_reader(swc_pointer)
 
-        # Most SWCs are far below min_cable_length; the raw path length is an
-        # upper bound on the cable length that "load" computes (pruning only
-        # removes edges), so they can be dropped before being dispatched.
-        swc_dicts = [
-            d for d in swc_dicts
-            if self.raw_cable_length(d) >= self.min_cable_length
-        ]
-
         # One task per SWC spends more on pickling and IPC than on the work
         # itself (~1 ms per SWC), so SWCs are dispatched in chunks.
         irreducibles = deque()
@@ -80,28 +74,6 @@ class GraphLoader:
                 if result:
                     irreducibles.append(result)
         return irreducibles
-
-    def raw_cable_length(self, swc_dict):
-        """
-        Sums the edge lengths of an SWC file as written, without building a
-        graph. This bounds the cable length of its irreducible components
-        from above.
-
-        Parameters
-        ----------
-        swc_dict : dict
-            Parsed contents of one SWC file.
-
-        Returns
-        -------
-        float
-        """
-        ids, pids, xyz = swc_dict["id"], swc_dict["pid"], swc_dict["xyz"]
-        order = np.argsort(ids)
-        parent = order[np.clip(np.searchsorted(ids[order], pids), 0, len(ids) - 1)]
-        has_parent = ids[parent] == pids
-        edges = xyz[has_parent] - xyz[parent[has_parent]]
-        return float(np.linalg.norm(edges, axis=1).sum())
 
     def load(self, swc_dict):
         """

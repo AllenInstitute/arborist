@@ -4,6 +4,12 @@ Created on Wed June 10 12:00:00 2026
 @author: Anna Grim
 @email: anna.grim@alleninstitute.org
 
+Curve autoencoder for 3D neuron paths. A transformer encoder tokenizes a curve
+into fixed-length segments of finite differences (plus a class token) and maps
+it to a single latent vector. An autoregressive LSTM decoder reconstructs the
+curve segment by segment from that latent, the arc position, and the previous
+segment's prediction.
+
 """
 
 import json
@@ -17,9 +23,9 @@ PTS_PER_STEP = 4
 class CurveEncoder(nn.Module):
     """
     Transformer encoder that maps 3D finite differences to a latent vector.
-     Curves are tokenized into fixed-length segments plus a class token, with
-      each segment encoding flattened finite differences and normalized arc-
-      length position.
+    Curves are tokenized into fixed-length segments plus a class token, with
+    each segment encoding flattened finite differences and normalized arc-
+    length position.
     """
 
     def __init__(
@@ -132,7 +138,7 @@ class CurveEncoder(nn.Module):
         return z, tokens
 
 
-class AutoregressiveINRDecoder(nn.Module):
+class AutoregressiveLSTMDecoder(nn.Module):
     """
     Autoregressive implicit neural representation decoder using an LSTM. At
     each step, predicts the next PTS_PER_STEP finite differences conditioned
@@ -267,7 +273,7 @@ class CurveAutoencoder(nn.Module):
             latent_dim=latent_dim,
             dropout=dropout,
         )
-        self.decoder = AutoregressiveINRDecoder(
+        self.decoder = AutoregressiveLSTMDecoder(
             latent_dim=latent_dim,
             d_hidden=256,
             n_layers=4,
@@ -306,6 +312,8 @@ class CurveAutoencoder(nn.Module):
     @classmethod
     def load(cls, path, map_location=None):
         checkpoint = torch.load(path, map_location=map_location, weights_only=True)
-        model = cls(**checkpoint["config"])
+        config = dict(checkpoint["config"])
+        config.pop("decoder_type", None)
+        model = cls(**config)
         model.load_state_dict(checkpoint["state_dict"])
         return model

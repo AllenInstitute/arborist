@@ -105,17 +105,14 @@ class GraphDataset(Dataset):
         Parameters
         ----------
         graph : SkeletonGraph
-            The full skeleton graph to sample from.
+            Full skeleton graph to sample from.
         root_nodes : List[int]
             One root node per dataset item.
         max_depth : float
             Depth in microns for rooted subgraph extraction.
         graph_transform : callable, optional
             Applied to the full (N_nodes, 3) node_xyz array of the rooted
-            subgraph before path decomposition (e.g. GraphTransforms). Because
-            it acts on all node coordinates at once, every curve in the
-            subgraph receives the same rotation and mirror flip, preserving
-            inter-curve spatial relationships. Default is None.
+            subgraph before path decomposition (e.g. GraphTransforms). Default is None.
         """
         # Call parent class
         super().__init__()
@@ -170,18 +167,11 @@ class TreeSample:
     A rooted subgraph ready to pass through CurveEncoder then GraphTransformer.
     Construct via ``build_tree_sample``.
 
-    The curves themselves are translation invariant; the positional arrays
-    say where each curve sits relative to the root and to every other curve
-    and feed the positional encodings (see arborist.models.positional_encoding).
-    They are indexed by token: token 0 is the root and ``curves[k]`` is token
-    ``k + 1``, with T = n_curves + 1 tokens in all.
-
     Attributes
     ----------
     curves : List[numpy.ndarray]
         One array per irreducible path, each of shape (N_i, 3). Values are
-        first-order finite differences with a leading zero row, matching the
-        convention expected by CurveEncoder.
+        first-order finite differences with a leading zero row.
     root_curve_indices : List[int]
         Indices into ``curves`` of the curves adjacent to the root.
     endpoints : numpy.ndarray
@@ -250,9 +240,7 @@ def build_tree_sample(curves, topo_edge_index, target=None):
     topo_idx = np.asarray(topo_edge_index, dtype=np.int64).reshape(n, 2)
     n_topo = 1 + int(topo_idx.max()) if n else 1
 
-    # Walk parent-first: a curve's distal node is its proximal node plus the
-    # sum of its step vectors, one more hop, and its cable length further out.
-    # ancestors[v] marks v and every node on its path to the root.
+    # Walk parent-first
     pos = np.zeros((n_topo, 3))
     hops = np.zeros(n_topo, dtype=np.float32)
     cable = np.zeros(n_topo, dtype=np.float32)
@@ -382,9 +370,6 @@ class DatasetCollection(Dataset):
         """
         Saves collection and dataset parameters to a single JSON file.
 
-        Dataset parameters are taken from the first constituent dataset
-        (all datasets in a collection share the same configuration).
-
         Parameters
         ----------
         path : str
@@ -459,12 +444,13 @@ def collate_curves(curves, min_len=1, device=None):
     n_max = max(max(lengths), min_len)
     B = len(curves)
 
-    padded = torch.zeros(B, n_max, 3, device=device)
-    mask = torch.ones(B, n_max, dtype=torch.bool, device=device)
+    # Pad curves if applicable
+    padded = np.zeros((B, n_max, 3), dtype=np.float32)
+    mask = np.ones((B, n_max), dtype=bool)
     for i, (c, l) in enumerate(zip(curves, lengths)):
-        padded[i, :l] = torch.as_tensor(c, dtype=torch.float32, device=device)
+        padded[i, :l] = c
         mask[i, :l] = False
-    return padded, mask
+    return torch.from_numpy(padded).to(device), torch.from_numpy(mask).to(device)
 
 
 def build_dataloader(

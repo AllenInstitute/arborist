@@ -91,7 +91,7 @@ class GraphTransformerLayer(nn.Module):
         attn_bias : torch.Tensor
             Shape (n_heads, n, n) float, added to the attention logits.
         """
-        h = self.norm1(x).unsqueeze(0)                 # (1, n, latent_dim)
+        h = self.norm1(x).unsqueeze(0)
         h, _ = self.attn(h, h, h, attn_mask=attn_bias)
         x = x + self.dropout(h.squeeze(0))
         x = x + self.dropout(self.ff(self.norm2(x)))
