@@ -15,6 +15,7 @@ segment's prediction.
 import json
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class CurveEncoder(nn.Module):
@@ -97,7 +98,15 @@ class CurveEncoder(nn.Module):
             Per-token encodings of shape (B, n_segments + 1, d_token).
         """
         B, N, _ = diffs.shape
-        n_segments = N // self.segment_len
+
+        # Zero-pad to a whole number of segments so the tail of a curve is
+        # encoded rather than dropped; zero steps add no arc length.
+        pad = (-N) % self.segment_len
+        if pad:
+            diffs = F.pad(diffs, (0, 0, 0, pad))
+            if mask is not None:
+                mask = F.pad(mask, (0, pad), value=True)
+        n_segments = (N + pad) // self.segment_len
 
         # Arc length: cumulative step norm, normalized to [0, 1] per sequence.
         step_len = diffs.norm(dim=-1)
