@@ -35,8 +35,8 @@ class Arborist(nn.Module):
 
     Parameters
     ----------
-    curve_segment_len : int, optional
-        Points per curve segment for CurveEncoder. Default is 10.
+    curve_nodes_per_token : int, optional
+        Nodes per token for CurveEncoder. Default is 10.
     curve_d_token : int, optional
         CurveEncoder token dimension. Default is 128.
     curve_n_heads : int, optional
@@ -76,7 +76,7 @@ class Arborist(nn.Module):
 
     def __init__(
         self,
-        curve_segment_len=10,
+        curve_nodes_per_token=10,
         curve_d_token=64,
         curve_n_heads=4,
         curve_n_layers=4,
@@ -95,7 +95,7 @@ class Arborist(nn.Module):
         if pooling not in ("cls", "hierarchical"):
             raise ValueError(f"Unknown pooling: {pooling}")
         self.config = {
-            "curve_segment_len": curve_segment_len,
+            "curve_nodes_per_token": curve_nodes_per_token,
             "curve_d_token": curve_d_token,
             "curve_n_heads": curve_n_heads,
             "curve_n_layers": curve_n_layers,
@@ -111,7 +111,7 @@ class Arborist(nn.Module):
             "pool_local_layers": pool_local_layers,
         }
         self.curve_encoder = CurveEncoder(
-            segment_len=curve_segment_len,
+            nodes_per_token=curve_nodes_per_token,
             d_token=curve_d_token,
             n_heads=curve_n_heads,
             n_layers=curve_n_layers,
@@ -167,7 +167,7 @@ class Arborist(nn.Module):
 
         # Embed each curve independently via the sequence transformer
         diffs, mask = collate_curves(
-            sample.curves, min_len=self.curve_encoder.segment_len, device=device
+            sample.curves, min_len=self.curve_encoder.nodes_per_token, device=device
         )
         z, _ = self.curve_encoder(diffs, mask)
 

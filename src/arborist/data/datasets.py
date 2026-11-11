@@ -29,13 +29,13 @@ class CurveDataset(Dataset):
         graph,
         brain_id=None,
         max_length=np.inf,
-        segment_len=10,
+        nodes_per_token=10,
         transform=None,
     ):
         # Instance attributes
         self.brain_id = brain_id
         self.max_length = max_length
-        self.segment_len = segment_len
+        self.nodes_per_token = nodes_per_token
         self.transform = transform
 
         # Core data structures
@@ -46,7 +46,7 @@ class CurveDataset(Dataset):
         paths = list()
         for p in self.irreducible_paths():
             length = self.path_length(p)
-            if length < self.max_length and len(p) > self.segment_len:
+            if length < self.max_length and len(p) > self.nodes_per_token:
                 paths.append(p)
         return paths
 
@@ -478,7 +478,7 @@ def collate_curves(curves, min_len=1, device=None):
     curves : List[numpy.ndarray]
         Each of shape (N_i, 3), where N_i can vary.
     min_len : int, optional
-        Minimum padded length, e.g. CurveEncoder's segment_len. Default is 1.
+        Minimum padded length, e.g. CurveEncoder's nodes_per_token. Default is 1.
     device : torch.device, optional
         Device for the returned tensors. Default is None (CPU).
 
