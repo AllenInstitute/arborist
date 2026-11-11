@@ -87,12 +87,19 @@ class GraphTransformerLayer(nn.Module):
         Parameters
         ----------
         x : torch.Tensor
-            Shape (n, latent_dim).
+            Shape (n, latent_dim), or (B, n, latent_dim) for B independent
+            token sets.
         attn_bias : torch.Tensor
-            Shape (n_heads, n, n) float, added to the attention logits.
+            Shape (n_heads, n, n) float, or (B * n_heads, n, n) for batched
+            input, added to the attention logits.
         """
-        h = self.norm1(x).unsqueeze(0)
+        h = self.norm1(x)
+        unbatched = h.dim() == 2
+        if unbatched:
+            h = h.unsqueeze(0)                         # (1, n, latent_dim)
         h, _ = self.attn(h, h, h, attn_mask=attn_bias)
-        x = x + self.dropout(h.squeeze(0))
+        if unbatched:
+            h = h.squeeze(0)
+        x = x + self.dropout(h)
         x = x + self.dropout(self.ff(self.norm2(x)))
         return x

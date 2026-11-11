@@ -194,6 +194,10 @@ class TreeSample:
     target : any, optional
         Supervised label for this sample (scalar, array, or dict). Stored
         alongside the sample so DataLoader batches can be self-contained.
+    parents : numpy.ndarray, optional
+        Shape (T,) int64. Token index of each token's parent curve (0 for
+        curves adjacent to the root, -1 for the root itself). Lets models
+        regroup curves into subtrees without re-deriving the topology.
     """
 
     curves: list
@@ -204,6 +208,7 @@ class TreeSample:
     rel_hops: np.ndarray
     rel_cable: np.ndarray
     target: object = None
+    parents: np.ndarray = None
 
     def __repr__(self):
         return f"TreeSample(n_curves={len(self.curves)})"
@@ -267,13 +272,17 @@ def build_tree_sample(curves, topo_edge_index, target=None):
     endpoints = np.stack([pos[proximal], pos[distal]], axis=1)
 
     # Lowest common ancestor of each token pair: the deepest shared ancestor
-    anc = ancestors[distal]                                        # (T, n_topo)
-    common = anc[:, None, :] & anc[None, :, :]                     # (T, T, n_topo)
-    lca = (common * (hops + 1)).argmax(axis=-1)                    # (T, T)
+    lca = _lowest_common_ancestors(ancestors, hops)[distal][:, distal]  # (T, T)
     up, down = hops[distal][:, None] - hops[lca], hops[distal][None, :] - hops[lca]
     rel_hops = np.stack([up, down], axis=-1)
     up, down = cable[distal][:, None] - cable[lca], cable[distal][None, :] - cable[lca]
     rel_cable = np.stack([up, down], axis=-1)
+
+    # Each curve's parent is the token whose distal node is its proximal node
+    token_of_distal = np.zeros(n_topo, dtype=np.int64)
+    token_of_distal[distal] = np.arange(n + 1)
+    parents = token_of_distal[proximal]
+    parents[0] = -1
 
     return TreeSample(
         curves=curves,
@@ -284,7 +293,47 @@ def build_tree_sample(curves, topo_edge_index, target=None):
         rel_hops=rel_hops.astype(np.float32),
         rel_cable=rel_cable.astype(np.float32),
         target=target,
+        parents=parents,
     )
+
+
+def _lowest_common_ancestors(ancestors, depths):
+    """
+    Lowest common ancestor of every pair of nodes in a rooted tree.
+
+    Lists each node's ancestor chain by depth, then counts how many depths
+    two chains agree on: that count minus one is the depth of their lowest
+    common ancestor. Costs O(n^2 * depth) time and memory, rather than the
+    O(n^3) of intersecting full ancestor sets.
+
+    Parameters
+    ----------
+    ancestors : numpy.ndarray
+        Shape (n, n) bool. ancestors[v, u] is True if u is v or on v's path
+        to the root.
+    depths : numpy.ndarray
+        Shape (n,). Depth of each node; the root is 0.
+
+    Returns
+    -------
+    numpy.ndarray
+        Shape (n, n) int64. lca[i, j] is the deepest common ancestor of i
+        and j.
+    """
+    n = len(depths)
+    depths = depths.astype(np.int64)
+    max_depth = int(depths.max())
+
+    # chain[v, d] is v's ancestor at depth d; padding past depth(v) is a
+    # unique negative id per node so it never matches another node's chain.
+    chain = np.full((n, max_depth + 1), 0, dtype=np.int64)
+    chain -= np.arange(1, n + 1)[:, None]
+    v_idx, u_idx = np.nonzero(ancestors)
+    chain[v_idx, depths[u_idx]] = u_idx
+
+    depth_lca = (chain[:, None, :] == chain[None, :, :]).sum(axis=-1) - 1
+    np.fill_diagonal(depth_lca, depths)
+    return chain[np.arange(n)[:, None], depth_lca]
 
 
 class DatasetCollection(Dataset):
