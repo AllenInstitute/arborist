@@ -181,11 +181,13 @@ class SkeletonGraph(rx.PyGraph):
         component_id : int
             Connected component ID.
         """
+        # Initializations
         i, j = edge_id
         dist_i = math.dist(self.node_xyz[i], attrs["xyz"][0])
         dist_j = math.dist(self.node_xyz[j], attrs["xyz"][0])
         start, end = (i, j) if dist_i < dist_j else (j, i)
 
+        # Populate edges
         prev_id = start
         for k, xyz in enumerate(attrs["xyz"][1:-1], start=1):
             new_id = self.add_node(None)
@@ -213,6 +215,7 @@ class SkeletonGraph(rx.PyGraph):
         """
         Reassigns component IDs for all connected components in the graph.
         """
+        # Reassign IDs
         component_id_to_swc_id = dict()
         for i, nodes in enumerate(rx.connected_components(self), start=1):
             nodes = np.array(list(nodes), dtype=int)
@@ -220,8 +223,7 @@ class SkeletonGraph(rx.PyGraph):
             self.node_component_id[nodes] = i
         self.component_id_to_swc_id = component_id_to_swc_id
 
-        # Deduplicate after IDs are rebuilt: components created by a split
-        # share a swc_id but now have distinct component IDs.
+        # Deduplicate after IDs are rebuilt
         self.check_swc_ids()
 
     def relabel_nodes(self):
@@ -268,6 +270,16 @@ class SkeletonGraph(rx.PyGraph):
             self.relabel_nodes()
 
     def remove_small_components(self, min_size=20, relabel_nodes=True):
+        """
+        Removes connected components with fewer than 20 nodes.
+
+        Parameters
+        ----------
+        min_size : int, optional
+            Minimal number of nodes in connected components that are kept.
+        relabel_nodes : bool, optional
+            True if nodes should be relabeled afer removing small components.
+        """
         rm_nodes = list()
         components, lengths = self.component_cable_lengths()
         for nodes, length in zip(components, lengths):
@@ -385,12 +397,7 @@ class SkeletonGraph(rx.PyGraph):
         it survives a load/write round-trip. Graphs built without that feature
         fall back to 2 (axon), which is what this writer always emitted before.
         """
-        # Step 1: DFS over the component in Python. rx.dfs_edges allocates
-        # a visited array over the whole graph on every call (7 ms at 13M
-        # nodes), so a per-component call made a full write of ~500k
-        # components take about an hour. Walking self.neighbors touches
-        # only the component. Each node's SWC id is its 1-based discovery
-        # index; its parent is the node it was discovered from.
+        # Step 1: DFS over the component
         nodes = [root]
         parents = [-1]
         swc_ids = {root: 1}
@@ -407,9 +414,7 @@ class SkeletonGraph(rx.PyGraph):
         nodes = np.asarray(nodes, dtype=np.int64)
         parents = np.asarray(parents, dtype=np.int64)
 
-        # Step 2: gather column data with vectorized indexing and convert to
-        # Python scalars once, which is several times faster than per-node
-        # numpy scalar access.
+        # Step 2: gather column data with vectorized indexing
         xyz = np.round(self.node_xyz[nodes].astype(np.float64), 4).tolist()
         if use_radius:
             radius = self.node_feats["radius"][nodes].astype(np.float64)
@@ -429,7 +434,7 @@ class SkeletonGraph(rx.PyGraph):
         ]
         text = "# id, type, z, y, x, r, pid\n" + "\n".join(lines)
 
-        # Deduplicate filename within zip (getinfo is O(1); namelist is O(n))
+        # Deduplicate filename within zip
         swc_id = self.node_swc_id(root)
         name = f"{swc_id}.swc"
         suffix = 0
