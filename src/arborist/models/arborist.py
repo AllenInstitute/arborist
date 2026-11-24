@@ -233,21 +233,8 @@ class Arborist(nn.Module):
     def load(cls, path, map_location=None):
         checkpoint = torch.load(path, map_location=map_location, weights_only=True)
         model = cls(**checkpoint["config"])
-        model.load_state_dict(upgrade_state_dict(checkpoint["state_dict"]))
+        model.load_state_dict(checkpoint["state_dict"])
         return model
-
-
-def upgrade_state_dict(state_dict):
-    """
-    Renames the keys of a state_dict saved before SubtreeGraphTransformer
-    inherited its between-subtree layers from GraphTransformer
-    ("global_layers" -> "layers"). Works under any prefix, so models that
-    hold an Arborist can call it on their own state_dict.
-    """
-    return {
-        k.replace("graph_transformer.global_layers.", "graph_transformer.layers."): v
-        for k, v in state_dict.items()
-    }
 
 
 # Width of each readout as a multiple of latent_dim
