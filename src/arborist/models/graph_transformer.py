@@ -209,8 +209,7 @@ class SubtreeGraphTransformer(GraphTransformer):
         x = x + pe
         attn_bias = self.relative_pe(endpoints[:, 1], rel_hops, rel_cable)
 
-        # Stage 1: each subtree is a padded row led by its class token, which
-        # takes the position of the subtree's head curve
+        # Stage 1: each subtree is a padded row led by its class token
         members, padding = self._pad_subtrees(subtree_of, len(roots))
         tokens = torch.cat([roots[:, None], members], dim=1)   # (S, m+1)
         padding = torch.cat([padding[:, :1] & False, padding], dim=1)
