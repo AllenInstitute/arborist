@@ -6,11 +6,10 @@ Created on Mon Aug 6 17:00:00 2026
 
 End-to-end Arborist model for neuron morphology encoding. ``Arborist``
 encodes one TreeSample into a global and per-curve embeddings;
-``ArboristEncoder`` encodes a batch and reads out one vector per tree tree_sample.
+``ArboristEncoder`` encodes a batch and reads out one vector per tree sample.
 
 """
 
-import numpy as np
 import torch
 import torch.nn as nn
 
@@ -166,7 +165,7 @@ class Arborist(nn.Module):
         z, _ = self.curve_encoder(diffs, mask)
 
         # Prepend the CLS token as token 0 (the root), matching the token
-        # order of the tree tree_sample's positional arrays
+        # order of the tree sample's positional arrays
         def t(x):
             return torch.as_tensor(x, dtype=torch.float32, device=device)
 
@@ -193,7 +192,7 @@ class Arborist(nn.Module):
 
     def subtrees(self, tree_sample):
         """
-        Partitions the tree tree_sample's curves into the connected subtrees used by
+        Partitions the tree sample's curves into the subtrees used by
         subtree pooling; see partition_curves.
 
         Returns
@@ -203,16 +202,7 @@ class Arborist(nn.Module):
         roots : numpy.ndarray
             Shape (S,) int. Root-adjacent curve token of each subtree.
         """
-        parents = getattr(tree_sample, "parents", None)
-        if parents is None:
-            # Older tree tree_samples: the parent is the one token one hop upstream
-            # and zero hops downstream of each curve's distal endpoint
-            is_parent = (tree_sample.rel_hops[..., 0] == 1) & (
-                tree_sample.rel_hops[..., 1] == 0
-            )
-            parents = is_parent.argmax(axis=1)
-            parents[0] = -1
-        return partition_curves(parents)
+        return partition_curves(tree_sample.parents)
 
     def forward(self, tree_sample):
         return self.encode(tree_sample)
@@ -233,7 +223,7 @@ class Arborist(nn.Module):
 class ArboristEncoder(nn.Module):
     """
     Arborist as an embedding module: encodes a batch of TreeSamples and
-    reads out one vector per tree tree_sample, for use as the morphology branch of a
+    reads out one vector per tree sample, for use as the morphology branch of a
     downstream model.
 
     Parameters
@@ -263,7 +253,7 @@ class ArboristEncoder(nn.Module):
         Parameters
         ----------
         tree_samples : List[TreeSample]
-            Batch of tree tree_samples, as returned by collate_trees.
+            Batch of tree samples, as returned by collate_trees.
 
         Returns
         -------
