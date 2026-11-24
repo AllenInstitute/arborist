@@ -109,45 +109,29 @@ class GraphTransformerLayer(nn.Module):
         return x
 
 
-def partition_curves(parents, lengths, max_cable=None):
+def partition_curves(parents):
     """
-    Partitions the curves of a TreeSample into connected subtrees.
-
-    Walks the curves leaf-first and merges each curve into its parent's
-    subtree while the subtree's total cable stays within max_cable, so
-    subtrees are connected and roughly balanced in cable. Curves adjacent
-    to the root always start their own subtree. With max_cable None the
-    subtrees are the whole subtrees under each root-adjacent curve.
+    Partitions the curves of a TreeSample into the subtrees under each
+    root-adjacent curve.
 
     Parameters
     ----------
     parents : numpy.ndarray
-        Shape (T,) int. Parent token of each token (see TreeSample.parents).
-    lengths : numpy.ndarray
-        Shape (T,) float. Cable length of each token's curve; entry 0 (the
-        root) is ignored.
-    max_cable : float, optional
-        Largest total cable (microns) a subtree may hold. Default is None.
+        Shape (T,) int. Parent token of each token (see TreeSample.parents);
+        parents precede their children.
 
     Returns
     -------
     group_of : numpy.ndarray
         Shape (T,) int. Subtree index of each token; -1 for the root.
     heads : numpy.ndarray
-        Shape (G,) int. Token index of each subtree's head curve, the member
-        closest to the root.
+        Shape (G,) int. Token index of each subtree's root-adjacent curve.
     """
     T = len(parents)
     head = np.arange(T)
-    acc = np.asarray(lengths, dtype=np.float64).copy()
-    limit = np.inf if max_cable is None else max_cable
-    for k in range(T - 1, 0, -1):
-        p = parents[k]
-        if p > 0 and acc[p] + acc[k] <= limit:
-            head[k] = p
-            acc[p] += acc[k]
     for k in range(1, T):
-        head[k] = head[head[k]]
+        if parents[k] > 0:
+            head[k] = head[parents[k]]
     heads = np.unique(head[1:])
     group_of = np.full(T, -1, dtype=np.int64)
     group_of[1:] = np.searchsorted(heads, head[1:])

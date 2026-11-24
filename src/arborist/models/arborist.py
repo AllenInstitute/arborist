@@ -24,7 +24,7 @@ from arborist.models.graph_transformer import (
 )
 
 POOLINGS = ("flat", "subtree")
-# Pooling names saved before the subtree transformer was renamed
+# Pooling names saved before the subtree transformer was renamed; see upgrade_config
 LEGACY_POOLING = {"cls": "flat", "hierarchical": "subtree"}
 
 
@@ -76,10 +76,6 @@ class Arborist(nn.Module):
         within connected subtrees of curves, each read out by its own class
         token, then between the root and the subtree tokens
         (SubtreeGraphTransformer). Default is "flat".
-    pool_cable : float, optional
-        Subtree pooling only. Largest total cable (microns) per subtree.
-        None uses the whole subtree under each root-adjacent curve. Default
-        is None.
     pool_local_layers : int, optional
         Subtree pooling only. Attention layers within each subtree;
         graph_n_layers then counts the layers between subtrees. Default is 1.
@@ -99,11 +95,9 @@ class Arborist(nn.Module):
         dropout=0.1,
         geom_scale=10.0,
         pooling="flat",
-        pool_cable=None,
         pool_local_layers=1,
     ):
         super().__init__()
-        pooling = LEGACY_POOLING.get(pooling, pooling)
         if pooling not in POOLINGS:
             raise ValueError(f"Unknown pooling: {pooling}")
         self.config = {
@@ -119,7 +113,6 @@ class Arborist(nn.Module):
             "dropout": dropout,
             "geom_scale": geom_scale,
             "pooling": pooling,
-            "pool_cable": pool_cable,
             "pool_local_layers": pool_local_layers,
         }
         self.curve_encoder = CurveEncoder(
@@ -230,10 +223,7 @@ class Arborist(nn.Module):
             )
             parents = is_parent.argmax(axis=1)
             parents[0] = -1
-        T = len(parents)
-        lengths = sample.rel_cable[np.arange(T), parents, 0]
-        lengths[0] = 0
-        return partition_curves(parents, lengths, self.config["pool_cable"])
+        return partition_curves(parents)
 
     def forward(self, sample):
         return self.encode(sample)
@@ -246,9 +236,20 @@ class Arborist(nn.Module):
     @classmethod
     def load(cls, path, map_location=None):
         checkpoint = torch.load(path, map_location=map_location, weights_only=True)
-        model = cls(**checkpoint["config"])
+        model = cls(**upgrade_config(checkpoint["config"]))
         model.load_state_dict(upgrade_state_dict(checkpoint["state_dict"]))
         return model
+
+
+def upgrade_config(config):
+    """
+    Maps constructor kwargs saved by an older Arborist onto the current
+    constructor: the old pooling names, and the removed pool_cable option.
+    """
+    config = {k: v for k, v in config.items() if k != "pool_cable"}
+    if "pooling" in config:
+        config["pooling"] = LEGACY_POOLING.get(config["pooling"], config["pooling"])
+    return config
 
 
 def upgrade_state_dict(state_dict):

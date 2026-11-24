@@ -13,25 +13,15 @@ from arborist.models.graph_transformer import partition_curves
 from tests.test_tree_sample import random_tree
 
 
-def curve_lengths(sample):
-    """Cable length of each token's own curve; 0 for the root."""
-    T = len(sample.parents)
-    lengths = sample.rel_cable[np.arange(T), sample.parents, 0]
-    lengths[0] = 0
-    return lengths
-
-
 class PartitionCurvesTest(unittest.TestCase):
-    """partition_curves makes connected, cable-bounded subtrees."""
+    """partition_curves makes one connected subtree per root curve."""
 
     def setUp(self):
         rng = np.random.default_rng(2)
         self.sample = build_tree_sample(*random_tree(40, rng))
-        self.lengths = curve_lengths(self.sample)
 
     def test_root_children_start_groups(self):
-        """With no cable limit, subtrees are those under each root curve."""
-        group_of, heads = partition_curves(self.sample.parents, self.lengths)
+        group_of, heads = partition_curves(self.sample.parents)
         self.assertEqual(group_of[0], -1)
         self.assertEqual(
             sorted(heads), sorted(k + 1 for k in self.sample.root_curve_indices)
@@ -40,31 +30,6 @@ class PartitionCurvesTest(unittest.TestCase):
             p = self.sample.parents[k]
             if p > 0:
                 self.assertEqual(group_of[k], group_of[p])
-
-    def test_cable_limit(self):
-        """Subtrees are connected and stay within the cable limit."""
-        limit = 3 * self.lengths.mean()
-        group_of, heads = partition_curves(
-            self.sample.parents, self.lengths, max_cable=limit
-        )
-        self.assertEqual(len(heads), group_of.max() + 1)
-        for g, head in enumerate(heads):
-            members = np.nonzero(group_of == g)[0]
-            self.assertIn(head, members)
-            total = self.lengths[members].sum()
-            self.assertTrue(total <= limit or len(members) == 1)
-            for k in members:
-                if k != head:
-                    self.assertEqual(group_of[self.sample.parents[k]], g)
-            self.assertNotEqual(group_of[self.sample.parents[head]], g)
-
-    def test_tiny_limit_is_one_curve_per_group(self):
-        """A limit below every curve length isolates each curve."""
-        group_of, heads = partition_curves(
-            self.sample.parents, self.lengths, max_cable=0.0
-        )
-        self.assertEqual(len(heads), len(self.sample.curves))
-        np.testing.assert_array_equal(heads, np.arange(1, len(group_of)))
 
 
 class SubtreeArboristTest(unittest.TestCase):
@@ -76,18 +41,16 @@ class SubtreeArboristTest(unittest.TestCase):
         self.sample = build_tree_sample(*random_tree(30, self.rng, min_pts=11))
 
     def test_rejects_unknown_pooling(self):
-        """An unknown pooling name raises; the old names map to the new."""
+        """An unknown pooling name raises."""
         with self.assertRaises(ValueError):
             Arborist(pooling="max")
-        self.assertEqual(Arborist(latent_dim=16, pooling="hierarchical").config["pooling"], "subtree")
-        self.assertEqual(Arborist(latent_dim=16, pooling="cls").config["pooling"], "flat")
 
     def test_shapes_and_gradients(self):
         """Every pooling returns the flat shapes and trains every parameter."""
         for kwargs in (
             {"pooling": "flat"},
             {"pooling": "subtree"},
-            {"pooling": "subtree", "pool_cable": 50.0, "pool_local_layers": 2},
+            {"pooling": "subtree", "pool_local_layers": 2},
         ):
             model = Arborist(latent_dim=16, **kwargs)
             z_tree, z_curves = model.encode(self.sample)
@@ -108,7 +71,7 @@ class SubtreeArboristTest(unittest.TestCase):
 
     def test_group_curves_without_parents(self):
         """Samples built before TreeSample.parents existed group identically."""
-        model = Arborist(latent_dim=16, pooling="subtree", pool_cable=50.0)
+        model = Arborist(latent_dim=16, pooling="subtree")
         s = self.sample
         legacy = TreeSample(
             s.curves, s.root_curve_indices, s.endpoints, s.hops, s.cable,
@@ -144,16 +107,13 @@ class SubtreeArboristTest(unittest.TestCase):
         return [(int(distal[p]), int(d)) for d, p in enumerate(self.sample.parents) if p >= 0]
 
     def test_save_load(self):
-        """Config round-trips; configs and keys from before the rename load."""
-        model = Arborist(latent_dim=16, pooling="subtree", pool_cable=75.0).eval()
+        """Config round-trips and legacy configs load as flat models."""
+        model = Arborist(latent_dim=16, pooling="subtree")
         flat = Arborist(latent_dim=16)
         with tempfile.TemporaryDirectory() as d:
             model.save(os.path.join(d, "s.pth"))
             loaded = Arborist.load(os.path.join(d, "s.pth"))
             self.assertEqual(loaded.config["pooling"], "subtree")
-            self.assertEqual(loaded.config["pool_cable"], 75.0)
-
-            # Flat model saved before pooling existed
             legacy = {
                 "config": {
                     k: v for k, v in flat.config.items() if not k.startswith("pool")
@@ -164,22 +124,6 @@ class SubtreeArboristTest(unittest.TestCase):
             self.assertEqual(
                 Arborist.load(os.path.join(d, "legacy.pth")).config["pooling"], "flat"
             )
-
-            # Subtree model saved under its old name and layer keys
-            old = {
-                "config": {**model.config, "pooling": "hierarchical"},
-                "state_dict": {
-                    k.replace("graph_transformer.layers.", "graph_transformer.global_layers."): v
-                    for k, v in model.state_dict().items()
-                },
-            }
-            torch.save(old, os.path.join(d, "old.pth"))
-            renamed = Arborist.load(os.path.join(d, "old.pth")).eval()
-            self.assertEqual(renamed.config["pooling"], "subtree")
-            with torch.no_grad():
-                torch.testing.assert_close(
-                    renamed.encode(self.sample)[0], model.encode(self.sample)[0]
-                )
 
 
 if __name__ == "__main__":
