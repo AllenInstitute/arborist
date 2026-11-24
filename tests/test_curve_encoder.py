@@ -12,7 +12,7 @@ class CurveEncoderTest(unittest.TestCase):
 
     def setUp(self):
         torch.manual_seed(0)
-        self.encoder = CurveEncoder(segment_len=10, d_token=16, latent_dim=8).eval()
+        self.encoder = CurveEncoder(nodes_per_token=10, d_token=16, latent_dim=8).eval()
 
     def test_partial_segment_is_encoded(self):
         """A 19-point curve yields two segment tokens, not one."""
@@ -26,7 +26,7 @@ class CurveEncoderTest(unittest.TestCase):
         self.assertFalse(torch.allclose(z, z_head))
 
     def test_whole_segments_unchanged(self):
-        """Padding is a no-op when the length is a multiple of segment_len."""
+        """Padding is a no-op when the length is a multiple of nodes_per_token."""
         diffs = torch.randn(2, 30, 3)
         diffs[:, 0] = 0
         with torch.no_grad():
