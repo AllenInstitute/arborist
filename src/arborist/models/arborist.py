@@ -24,8 +24,6 @@ from arborist.models.graph_transformer import (
 )
 
 POOLINGS = ("flat", "subtree")
-# Pooling names saved before the subtree transformer was renamed; see upgrade_config
-LEGACY_POOLING = {"cls": "flat", "hierarchical": "subtree"}
 
 
 class Arborist(nn.Module):
@@ -242,14 +240,8 @@ class Arborist(nn.Module):
 
 
 def upgrade_config(config):
-    """
-    Maps constructor kwargs saved by an older Arborist onto the current
-    constructor: the old pooling names, and the removed pool_cable option.
-    """
-    config = {k: v for k, v in config.items() if k != "pool_cable"}
-    if "pooling" in config:
-        config["pooling"] = LEGACY_POOLING.get(config["pooling"], config["pooling"])
-    return config
+    """Drops the removed pool_cable option from saved constructor kwargs."""
+    return {k: v for k, v in config.items() if k != "pool_cable"}
 
 
 def upgrade_state_dict(state_dict):
