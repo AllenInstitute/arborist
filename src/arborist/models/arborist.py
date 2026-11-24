@@ -172,9 +172,9 @@ class Arborist(nn.Module):
 
         kwargs = {}
         if self.config["pooling"] == "subtree":
-            group_of, heads = self.group_curves(sample)
-            kwargs["group_of"] = torch.as_tensor(group_of, device=device)
-            kwargs["heads"] = torch.as_tensor(heads, device=device)
+            subtree_of, roots = self.subtrees(sample)
+            kwargs["subtree_of"] = torch.as_tensor(subtree_of, device=device)
+            kwargs["roots"] = torch.as_tensor(roots, device=device)
 
         z_out = self.graph_transformer(
             torch.cat([self.cls_token.unsqueeze(0), z], dim=0),
@@ -191,17 +191,17 @@ class Arborist(nn.Module):
         z_curves = z_out[1:]
         return z_tree, z_curves
 
-    def group_curves(self, sample):
+    def subtrees(self, sample):
         """
         Partitions the sample's curves into the connected subtrees used by
         subtree pooling; see partition_curves.
 
         Returns
         -------
-        group_of : numpy.ndarray
+        subtree_of : numpy.ndarray
             Shape (T,) int. Subtree of each token, -1 for the root.
-        heads : numpy.ndarray
-            Shape (G,) int. Head token of each subtree.
+        roots : numpy.ndarray
+            Shape (S,) int. Root-adjacent curve token of each subtree.
         """
         parents = getattr(sample, "parents", None)
         if parents is None:

@@ -118,20 +118,20 @@ def partition_curves(parents):
 
     Returns
     -------
-    group_of : numpy.ndarray
+    subtree_of : numpy.ndarray
         Shape (T,) int. Subtree index of each token; -1 for the root.
-    heads : numpy.ndarray
-        Shape (G,) int. Token index of each subtree's root-adjacent curve.
+    roots : numpy.ndarray
+        Shape (S,) int. Token index of each subtree's root-adjacent curve.
     """
     T = len(parents)
-    head = np.arange(T)
+    root = np.arange(T)
     for k in range(1, T):
         if parents[k] > 0:
-            head[k] = head[parents[k]]
-    heads = np.unique(head[1:])
-    group_of = np.full(T, -1, dtype=np.int64)
-    group_of[1:] = np.searchsorted(heads, head[1:])
-    return group_of, heads
+            root[k] = root[parents[k]]
+    roots = np.unique(root[1:])
+    subtree_of = np.full(T, -1, dtype=np.int64)
+    subtree_of[1:] = np.searchsorted(roots, root[1:])
+    return subtree_of, roots
 
 
 class SubtreeGraphTransformer(GraphTransformer):
@@ -173,7 +173,7 @@ class SubtreeGraphTransformer(GraphTransformer):
     ):
         super().__init__(latent_dim, d_ff, dropout, geom_scale, n_heads, n_layers)
         self.n_heads = n_heads
-        self.group_cls = nn.Parameter(torch.zeros(latent_dim))
+        self.subtree_cls = nn.Parameter(torch.zeros(latent_dim))
         self.local_layer = GraphTransformerLayer(latent_dim, n_heads, d_ff, dropout)
         self.broadcast = nn.Sequential(
             nn.LayerNorm(latent_dim),
@@ -184,7 +184,7 @@ class SubtreeGraphTransformer(GraphTransformer):
         )
 
     def forward(
-        self, x, endpoints, hops, cable, rel_hops, rel_cable, group_of, heads
+        self, x, endpoints, hops, cable, rel_hops, rel_cable, subtree_of, roots
     ):
         """
         Parameters
@@ -195,10 +195,10 @@ class SubtreeGraphTransformer(GraphTransformer):
             Per-token inputs to GlobalPE; see its forward.
         rel_hops, rel_cable : torch.Tensor
             Pairwise inputs to RelativePE; see its forward.
-        group_of : torch.Tensor
+        subtree_of : torch.Tensor
             Shape (T,) long. Subtree of each token, -1 for the root.
-        heads : torch.Tensor
-            Shape (G,) long. Head token of each subtree.
+        roots : torch.Tensor
+            Shape (S,) long. Root-adjacent curve token of each subtree.
 
         Returns
         -------
@@ -211,18 +211,18 @@ class SubtreeGraphTransformer(GraphTransformer):
 
         # Stage 1: each subtree is a padded row led by its class token, which
         # takes the position of the subtree's head curve
-        members, padding = self._pad_groups(group_of, len(heads))
-        tokens = torch.cat([heads[:, None], members], dim=1)   # (G, m+1)
+        members, padding = self._pad_subtrees(subtree_of, len(roots))
+        tokens = torch.cat([roots[:, None], members], dim=1)   # (S, m+1)
         padding = torch.cat([padding[:, :1] & False, padding], dim=1)
         h = x[tokens]
-        h[:, 0] = self.group_cls + pe[heads]
+        h[:, 0] = self.subtree_cls + pe[roots]
         bias = self._gather_bias(attn_bias, tokens, padding)
         h = self.local_layer(h, bias)
-        groups = h[:, 0]                                       # (G, d)
+        subtrees = h[:, 0]                                     # (S, d)
 
         # Stage 2: the root attends with the subtree class tokens
-        sel = torch.cat([heads.new_zeros(1), heads])
-        g = torch.cat([x[:1], groups], dim=0)
+        sel = torch.cat([roots.new_zeros(1), roots])
+        g = torch.cat([x[:1], subtrees], dim=0)
         g_bias = attn_bias[:, sel[:, None], sel[None, :]]
         for layer in self.layers:
             g = layer(g, g_bias)
@@ -232,36 +232,36 @@ class SubtreeGraphTransformer(GraphTransformer):
         order = members[keep]
         out = x.new_empty(x.shape)
         out[0] = g[0]
-        out[order] = h[:, 1:][keep] + self.broadcast(g[1:][group_of[order]])
+        out[order] = h[:, 1:][keep] + self.broadcast(g[1:][subtree_of[order]])
         return self.norm(out)
 
     def _gather_bias(self, attn_bias, tokens, padding):
         """
         Restricts the (n_heads, T, T) attention bias to each padded subtree,
-        masking padded keys, as one (G * n_heads, m, m) attention mask.
+        masking padded keys, as one (S * n_heads, m, m) attention mask.
         """
-        G, m = tokens.shape
+        S, m = tokens.shape
         bias = attn_bias[:, tokens[:, :, None], tokens[:, None, :]]
-        bias = bias.permute(1, 0, 2, 3)                        # (G, H, m, m)
+        bias = bias.permute(1, 0, 2, 3)                        # (S, H, m, m)
         masked = padding[:, None, None, :].expand(-1, self.n_heads, m, -1)
         return bias.masked_fill(masked, float("-inf")).flatten(0, 1)
 
     @staticmethod
-    def _pad_groups(group_of, n_groups):
+    def _pad_subtrees(subtree_of, n_subtrees):
         """
-        Indexes the tokens of each subtree into a padded (G, m) matrix, where
+        Indexes the tokens of each subtree into a padded (S, m) matrix, where
         padding slots point at token 0 and are flagged in the mask.
         """
-        counts = torch.bincount(group_of[1:], minlength=n_groups)
+        counts = torch.bincount(subtree_of[1:], minlength=n_subtrees)
         m = int(counts.max())
-        order = torch.argsort(group_of[1:], stable=True) + 1
+        order = torch.argsort(subtree_of[1:], stable=True) + 1
         starts = torch.cumsum(counts, 0) - counts
-        slot = torch.arange(len(order), device=group_of.device)
-        slot = slot - starts[group_of[order]]
-        members = group_of.new_zeros(n_groups, m)
+        slot = torch.arange(len(order), device=subtree_of.device)
+        slot = slot - starts[subtree_of[order]]
+        members = subtree_of.new_zeros(n_subtrees, m)
         padding = torch.ones(
-            n_groups, m, dtype=torch.bool, device=group_of.device
+            n_subtrees, m, dtype=torch.bool, device=subtree_of.device
         )
-        members[group_of[order], slot] = order
-        padding[group_of[order], slot] = False
+        members[subtree_of[order], slot] = order
+        padding[subtree_of[order], slot] = False
         return members, padding
