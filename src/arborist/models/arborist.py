@@ -6,7 +6,7 @@ Created on Mon Aug 6 17:00:00 2026
 
 End-to-end Arborist model for neuron morphology encoding. ``Arborist``
 encodes one TreeSample into a global and per-curve embeddings;
-``ArboristEncoder`` encodes a batch and reads out one vector per sample.
+``ArboristEncoder`` encodes a batch and reads out one vector per tree tree_sample.
 
 """
 
@@ -135,13 +135,13 @@ class Arborist(nn.Module):
         self.cls_token = nn.Parameter(torch.zeros(latent_dim))
 
     @torch._dynamo.disable
-    def encode(self, sample):
+    def encode(self, tree_sample):
         """
         Encodes a TreeSample into per-curve and global tree embeddings.
 
         Parameters
         ----------
-        sample : TreeSample
+        tree_sample : TreeSample
             A rooted subgraph as returned by GraphDataset.__getitem__.
 
         Returns
@@ -155,34 +155,34 @@ class Arborist(nn.Module):
         """
         device = next(self.parameters()).device
 
-        if not sample.curves:
+        if not tree_sample.curves:
             empty = torch.zeros(self.config["latent_dim"], device=device)
             return empty, empty.unsqueeze(0)
 
         # Embed each curve independently via the sequence transformer
         diffs, mask = collate_curves(
-            sample.curves, min_len=self.curve_encoder.nodes_per_token, device=device
+            tree_sample.curves, min_len=self.curve_encoder.nodes_per_token, device=device
         )
         z, _ = self.curve_encoder(diffs, mask)
 
         # Prepend the CLS token as token 0 (the root), matching the token
-        # order of the sample's positional arrays
+        # order of the tree tree_sample's positional arrays
         def t(x):
             return torch.as_tensor(x, dtype=torch.float32, device=device)
 
         kwargs = {}
         if self.config["pooling"] == "subtree":
-            subtree_of, roots = self.subtrees(sample)
+            subtree_of, roots = self.subtrees(tree_sample)
             kwargs["subtree_of"] = torch.as_tensor(subtree_of, device=device)
             kwargs["roots"] = torch.as_tensor(roots, device=device)
 
         z_out = self.graph_transformer(
             torch.cat([self.cls_token.unsqueeze(0), z], dim=0),
-            endpoints=t(sample.endpoints),
-            hops=t(sample.hops),
-            cable=t(sample.cable),
-            rel_hops=t(sample.rel_hops),
-            rel_cable=t(sample.rel_cable),
+            endpoints=t(tree_sample.endpoints),
+            hops=t(tree_sample.hops),
+            cable=t(tree_sample.cable),
+            rel_hops=t(tree_sample.rel_hops),
+            rel_cable=t(tree_sample.rel_cable),
             **kwargs,
         )
 
@@ -191,9 +191,9 @@ class Arborist(nn.Module):
         z_curves = z_out[1:]
         return z_tree, z_curves
 
-    def subtrees(self, sample):
+    def subtrees(self, tree_sample):
         """
-        Partitions the sample's curves into the connected subtrees used by
+        Partitions the tree tree_sample's curves into the connected subtrees used by
         subtree pooling; see partition_curves.
 
         Returns
@@ -203,19 +203,19 @@ class Arborist(nn.Module):
         roots : numpy.ndarray
             Shape (S,) int. Root-adjacent curve token of each subtree.
         """
-        parents = getattr(sample, "parents", None)
+        parents = getattr(tree_sample, "parents", None)
         if parents is None:
-            # Older samples: the parent is the one token one hop upstream
+            # Older tree tree_samples: the parent is the one token one hop upstream
             # and zero hops downstream of each curve's distal endpoint
-            is_parent = (sample.rel_hops[..., 0] == 1) & (
-                sample.rel_hops[..., 1] == 0
+            is_parent = (tree_sample.rel_hops[..., 0] == 1) & (
+                tree_sample.rel_hops[..., 1] == 0
             )
             parents = is_parent.argmax(axis=1)
             parents[0] = -1
         return partition_curves(parents)
 
-    def forward(self, sample):
-        return self.encode(sample)
+    def forward(self, tree_sample):
+        return self.encode(tree_sample)
 
     def save(self, path):
         torch.save(
@@ -233,7 +233,7 @@ class Arborist(nn.Module):
 class ArboristEncoder(nn.Module):
     """
     Arborist as an embedding module: encodes a batch of TreeSamples and
-    reads out one vector per sample, for use as the morphology branch of a
+    reads out one vector per tree tree_sample, for use as the morphology branch of a
     downstream model.
 
     Parameters
@@ -258,12 +258,12 @@ class ArboristEncoder(nn.Module):
         self.arborist = Arborist(latent_dim=latent_dim, **arborist_kwargs)
 
     @torch._dynamo.disable
-    def forward(self, samples):
+    def forward(self, tree_samples):
         """
         Parameters
         ----------
-        samples : List[TreeSample]
-            Batch of samples, as returned by collate_trees.
+        tree_samples : List[TreeSample]
+            Batch of tree tree_samples, as returned by collate_trees.
 
         Returns
         -------
@@ -273,10 +273,10 @@ class ArboristEncoder(nn.Module):
         # Arborist builds fp32 tensors from numpy inside encode
         with torch.amp.autocast("cuda", enabled=False):
             z = []
-            for s in samples:
-                z_tree, z_curves = self.arborist.encode(s)
+            for tree_sample in tree_samples:
+                z_tree, z_curves = self.arborist.encode(tree_sample)
                 if self.readout == "cls+root_curves":
-                    idx = list(s.root_curve_indices or range(len(z_curves)))
+                    idx = list(tree_sample.root_curve_indices or range(len(z_curves)))
                     z_tree = torch.cat([z_tree, z_curves[idx].mean(dim=0)])
                 z.append(z_tree)
         return torch.stack(z)
