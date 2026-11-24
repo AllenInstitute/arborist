@@ -17,11 +17,15 @@ import torch.nn as nn
 
 from arborist.data.datasets import collate_curves
 from arborist.models.curve_transformer import CurveEncoder
-from arborist.models.graph_transformer import GraphTransformer
-from arborist.models.hierarchical_transformer import (
-    HierarchicalGraphTransformer,
+from arborist.models.graph_transformer import (
+    GraphTransformer,
+    SubtreeGraphTransformer,
     partition_curves,
 )
+
+POOLINGS = ("flat", "subtree")
+# Pooling names saved before the subtree transformer was renamed
+LEGACY_POOLING = {"cls": "flat", "hierarchical": "subtree"}
 
 
 class Arborist(nn.Module):
@@ -29,12 +33,16 @@ class Arborist(nn.Module):
     End-to-end neuron morphology encoder.
 
     Encodes a TreeSample in three stages:
-      1. CurveEncoder   — each irreducible path → latent vector z_i (shape
-                          only; translation-invariant)
-      2. GraphTransformer — attention across all curves of the subgraph, with
-                           each curve's placement and distance from the root
-                           added as a global PE
-      3. Readout      — CLS token output → global tree z
+      1. CurveEncoder — each irreducible path → latent vector z_i (shape
+                        only; translation-invariant)
+      2. Graph transformer — attention across the curves of the subgraph,
+                        with each curve's placement and distance from the
+                        root as positional encodings. "flat" pooling attends
+                        over all curves at once; "subtree" pooling attends
+                        within connected subtrees, then between the subtrees
+                        and the root.
+      3. Readout — CLS token output → global tree z, per-curve outputs →
+                   z_curves; see ``readout``.
 
     Parameters
     ----------
@@ -63,18 +71,18 @@ class Arborist(nn.Module):
         Reference length r0 (microns) for log compression in the positional
         encoding; see GlobalPE. Default is 10.0.
     pooling : str, optional
-        How the global tree embedding is read out. "cls": one flat attention
-        stack over all curves, read from the root token. "hierarchical":
-        attention within connected groups of curves, each read out by its
-        own class token, then attention between the root and the group
-        tokens; see HierarchicalGraphTransformer. Default is "cls".
+        Attention pattern of the graph transformer. "flat": one attention
+        stack over all curves (GraphTransformer). "subtree": attention
+        within connected subtrees of curves, each read out by its own class
+        token, then between the root and the subtree tokens
+        (SubtreeGraphTransformer). Default is "flat".
     pool_cable : float, optional
-        Hierarchical pooling only. Largest total cable (microns) per group.
-        None groups by the subtree under each root-adjacent curve. Default
+        Subtree pooling only. Largest total cable (microns) per subtree.
+        None uses the whole subtree under each root-adjacent curve. Default
         is None.
     pool_local_layers : int, optional
-        Hierarchical pooling only. Attention layers within each group;
-        graph_n_layers then counts the layers between groups. Default is 1.
+        Subtree pooling only. Attention layers within each subtree;
+        graph_n_layers then counts the layers between subtrees. Default is 1.
     """
 
     def __init__(
@@ -90,12 +98,13 @@ class Arborist(nn.Module):
         latent_dim=64,
         dropout=0.1,
         geom_scale=10.0,
-        pooling="cls",
+        pooling="flat",
         pool_cable=None,
         pool_local_layers=1,
     ):
         super().__init__()
-        if pooling not in ("cls", "hierarchical"):
+        pooling = LEGACY_POOLING.get(pooling, pooling)
+        if pooling not in POOLINGS:
             raise ValueError(f"Unknown pooling: {pooling}")
         self.config = {
             "curve_nodes_per_token": curve_nodes_per_token,
@@ -122,12 +131,12 @@ class Arborist(nn.Module):
             latent_dim=latent_dim,
             dropout=dropout,
         )
-        if pooling == "hierarchical":
-            self.graph_transformer = HierarchicalGraphTransformer(
+        if pooling == "subtree":
+            self.graph_transformer = SubtreeGraphTransformer(
                 latent_dim=latent_dim,
                 n_heads=graph_n_heads,
+                n_layers=graph_n_layers,
                 n_local_layers=pool_local_layers,
-                n_global_layers=graph_n_layers,
                 d_ff=graph_d_ff,
                 dropout=dropout,
                 geom_scale=geom_scale,
@@ -180,7 +189,7 @@ class Arborist(nn.Module):
             return torch.as_tensor(x, dtype=torch.float32, device=device)
 
         kwargs = {}
-        if self.config["pooling"] == "hierarchical":
+        if self.config["pooling"] == "subtree":
             group_of, heads = self.group_curves(sample)
             kwargs["group_of"] = torch.as_tensor(group_of, device=device)
             kwargs["heads"] = torch.as_tensor(heads, device=device)
@@ -202,15 +211,15 @@ class Arborist(nn.Module):
 
     def group_curves(self, sample):
         """
-        Partitions the sample's curves into the connected groups used by
-        hierarchical pooling; see partition_curves.
+        Partitions the sample's curves into the connected subtrees used by
+        subtree pooling; see partition_curves.
 
         Returns
         -------
         group_of : numpy.ndarray
-            Shape (T,) int. Group of each token, -1 for the root.
+            Shape (T,) int. Subtree of each token, -1 for the root.
         heads : numpy.ndarray
-            Shape (G,) int. Head token of each group.
+            Shape (G,) int. Head token of each subtree.
         """
         parents = getattr(sample, "parents", None)
         if parents is None:
@@ -238,8 +247,21 @@ class Arborist(nn.Module):
     def load(cls, path, map_location=None):
         checkpoint = torch.load(path, map_location=map_location, weights_only=True)
         model = cls(**checkpoint["config"])
-        model.load_state_dict(checkpoint["state_dict"])
+        model.load_state_dict(upgrade_state_dict(checkpoint["state_dict"]))
         return model
+
+
+def upgrade_state_dict(state_dict):
+    """
+    Renames the keys of a state_dict saved before SubtreeGraphTransformer
+    inherited its between-subtree layers from GraphTransformer
+    ("global_layers" -> "layers"). Works under any prefix, so models that
+    hold an Arborist can call it on their own state_dict.
+    """
+    return {
+        k.replace("graph_transformer.global_layers.", "graph_transformer.layers."): v
+        for k, v in state_dict.items()
+    }
 
 
 # Width of each readout as a multiple of latent_dim

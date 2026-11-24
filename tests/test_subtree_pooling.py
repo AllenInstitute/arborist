@@ -1,4 +1,4 @@
-"""Tests for hierarchical pooling in Arborist."""
+"""Tests for subtree pooling in Arborist."""
 
 import os
 import tempfile
@@ -9,7 +9,7 @@ import torch
 
 from arborist.data.datasets import TreeSample, build_tree_sample
 from arborist.models.arborist import Arborist
-from arborist.models.hierarchical_transformer import partition_curves
+from arborist.models.graph_transformer import partition_curves
 from tests.test_tree_sample import random_tree
 
 
@@ -22,7 +22,7 @@ def curve_lengths(sample):
 
 
 class PartitionCurvesTest(unittest.TestCase):
-    """partition_curves makes connected, cable-bounded groups."""
+    """partition_curves makes connected, cable-bounded subtrees."""
 
     def setUp(self):
         rng = np.random.default_rng(2)
@@ -30,7 +30,7 @@ class PartitionCurvesTest(unittest.TestCase):
         self.lengths = curve_lengths(self.sample)
 
     def test_root_children_start_groups(self):
-        """With no cable limit, groups are the subtrees under the root."""
+        """With no cable limit, subtrees are those under each root curve."""
         group_of, heads = partition_curves(self.sample.parents, self.lengths)
         self.assertEqual(group_of[0], -1)
         self.assertEqual(
@@ -42,7 +42,7 @@ class PartitionCurvesTest(unittest.TestCase):
                 self.assertEqual(group_of[k], group_of[p])
 
     def test_cable_limit(self):
-        """Groups are connected and stay within the cable limit."""
+        """Subtrees are connected and stay within the cable limit."""
         limit = 3 * self.lengths.mean()
         group_of, heads = partition_curves(
             self.sample.parents, self.lengths, max_cable=limit
@@ -67,8 +67,8 @@ class PartitionCurvesTest(unittest.TestCase):
         np.testing.assert_array_equal(heads, np.arange(1, len(group_of)))
 
 
-class HierarchicalArboristTest(unittest.TestCase):
-    """Arborist with pooling="hierarchical" runs end to end."""
+class SubtreeArboristTest(unittest.TestCase):
+    """Arborist with pooling="subtree" runs end to end."""
 
     def setUp(self):
         torch.manual_seed(0)
@@ -76,16 +76,18 @@ class HierarchicalArboristTest(unittest.TestCase):
         self.sample = build_tree_sample(*random_tree(30, self.rng, min_pts=11))
 
     def test_rejects_unknown_pooling(self):
-        """An unknown pooling name raises."""
+        """An unknown pooling name raises; the old names map to the new."""
         with self.assertRaises(ValueError):
             Arborist(pooling="max")
+        self.assertEqual(Arborist(latent_dim=16, pooling="hierarchical").config["pooling"], "subtree")
+        self.assertEqual(Arborist(latent_dim=16, pooling="cls").config["pooling"], "flat")
 
     def test_shapes_and_gradients(self):
         """Every pooling returns the flat shapes and trains every parameter."""
         for kwargs in (
-            {"pooling": "cls"},
-            {"pooling": "hierarchical"},
-            {"pooling": "hierarchical", "pool_cable": 50.0, "pool_local_layers": 2},
+            {"pooling": "flat"},
+            {"pooling": "subtree"},
+            {"pooling": "subtree", "pool_cable": 50.0, "pool_local_layers": 2},
         ):
             model = Arborist(latent_dim=16, **kwargs)
             z_tree, z_curves = model.encode(self.sample)
@@ -97,7 +99,7 @@ class HierarchicalArboristTest(unittest.TestCase):
 
     def test_single_curve_and_empty(self):
         """Degenerate trees encode without error."""
-        model = Arborist(latent_dim=16, pooling="hierarchical")
+        model = Arborist(latent_dim=16, pooling="subtree")
         one = build_tree_sample(*random_tree(1, self.rng, min_pts=11))
         self.assertEqual(model.encode(one)[1].shape, (1, 16))
         empty = TreeSample([], [], None, None, None, None, None)
@@ -106,7 +108,7 @@ class HierarchicalArboristTest(unittest.TestCase):
 
     def test_group_curves_without_parents(self):
         """Samples built before TreeSample.parents existed group identically."""
-        model = Arborist(latent_dim=16, pooling="hierarchical", pool_cable=50.0)
+        model = Arborist(latent_dim=16, pooling="subtree", pool_cable=50.0)
         s = self.sample
         legacy = TreeSample(
             s.curves, s.root_curve_indices, s.endpoints, s.hops, s.cable,
@@ -118,10 +120,10 @@ class HierarchicalArboristTest(unittest.TestCase):
         np.testing.assert_array_equal(heads, legacy_heads)
 
     def test_curves_outside_group_do_not_mix_in_stage_one(self):
-        """Stage 1 is local: curve outputs depend on other groups only via
-        the broadcast group tokens, so with the broadcast zeroed a change
-        to one group leaves the other groups' curves unchanged."""
-        model = Arborist(latent_dim=16, pooling="hierarchical").eval()
+        """Stage 1 is local: curve outputs depend on other subtrees only via
+        the broadcast subtree tokens, so with the broadcast zeroed a change
+        to one subtree leaves the other subtrees' curves unchanged."""
+        model = Arborist(latent_dim=16, pooling="subtree").eval()
         for p in model.graph_transformer.broadcast.parameters():
             torch.nn.init.zeros_(p)
         group_of, _ = model.group_curves(self.sample)
@@ -142,14 +144,16 @@ class HierarchicalArboristTest(unittest.TestCase):
         return [(int(distal[p]), int(d)) for d, p in enumerate(self.sample.parents) if p >= 0]
 
     def test_save_load(self):
-        """Config round-trips and legacy configs load as flat models."""
-        model = Arborist(latent_dim=16, pooling="hierarchical", pool_cable=75.0)
+        """Config round-trips; configs and keys from before the rename load."""
+        model = Arborist(latent_dim=16, pooling="subtree", pool_cable=75.0).eval()
         flat = Arborist(latent_dim=16)
         with tempfile.TemporaryDirectory() as d:
-            model.save(os.path.join(d, "h.pth"))
-            loaded = Arborist.load(os.path.join(d, "h.pth"))
-            self.assertEqual(loaded.config["pooling"], "hierarchical")
+            model.save(os.path.join(d, "s.pth"))
+            loaded = Arborist.load(os.path.join(d, "s.pth"))
+            self.assertEqual(loaded.config["pooling"], "subtree")
             self.assertEqual(loaded.config["pool_cable"], 75.0)
+
+            # Flat model saved before pooling existed
             legacy = {
                 "config": {
                     k: v for k, v in flat.config.items() if not k.startswith("pool")
@@ -158,8 +162,24 @@ class HierarchicalArboristTest(unittest.TestCase):
             }
             torch.save(legacy, os.path.join(d, "legacy.pth"))
             self.assertEqual(
-                Arborist.load(os.path.join(d, "legacy.pth")).config["pooling"], "cls"
+                Arborist.load(os.path.join(d, "legacy.pth")).config["pooling"], "flat"
             )
+
+            # Subtree model saved under its old name and layer keys
+            old = {
+                "config": {**model.config, "pooling": "hierarchical"},
+                "state_dict": {
+                    k.replace("graph_transformer.layers.", "graph_transformer.global_layers."): v
+                    for k, v in model.state_dict().items()
+                },
+            }
+            torch.save(old, os.path.join(d, "old.pth"))
+            renamed = Arborist.load(os.path.join(d, "old.pth")).eval()
+            self.assertEqual(renamed.config["pooling"], "subtree")
+            with torch.no_grad():
+                torch.testing.assert_close(
+                    renamed.encode(self.sample)[0], model.encode(self.sample)[0]
+                )
 
 
 if __name__ == "__main__":
