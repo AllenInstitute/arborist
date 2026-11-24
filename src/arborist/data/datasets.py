@@ -192,8 +192,8 @@ class TreeSample:
         Shape (T, T, 2) float32. Cable length (microns) along the same
         upstream and downstream path segments.
     target : any, optional
-        Supervised label for this sample (scalar, array, or dict). Stored
-        alongside the sample so DataLoader batches can be self-contained.
+        Supervised label for this tree sample (scalar, array, or dict).
+        Stored alongside the tree sample so DataLoader batches can be self-contained.
     parents : numpy.ndarray, optional
         Shape (T,) int64. Token index of each token's parent curve (0 for
         curves adjacent to the root, -1 for the root itself). Lets models
@@ -235,7 +235,7 @@ def build_tree_sample(curves, topo_edge_index, target=None):
         with node 0 the root and every curve listed after its parent, as
         produced by ``topological_decomposition``.
     target : any, optional
-        Supervised label to embed in the sample.
+        Supervised label to embed in the tree sample.
 
     Returns
     -------
@@ -543,27 +543,27 @@ def build_dataloader(
     )
 
 
-def collate_trees(samples):
+def collate_trees(tree_samples):
     """
     Collate a list of TreeSamples into a batch.
 
     Trees vary in the number of curves, so they cannot be naively stacked.
-    The samples are returned as a plain list; targets, when present, are
+    The tree samples are returned as a plain list; targets, when present, are
     stacked into a float tensor. The model is expected to loop over the list
     and accumulate gradients across the batch.
 
     Returns
     -------
-    samples : List[TreeSample]
+    tree_samples : List[TreeSample]
     targets : torch.Tensor or None
-        Shape (B,) or (B, ...) if all samples carry a target, else None.
+        Shape (B,) or (B, ...) if all tree samples carry a target, else None.
     """
     targets = None
-    if samples[0].target is not None:
+    if tree_samples[0].target is not None:
         targets = torch.stack([
-            torch.as_tensor(s.target, dtype=torch.float32) for s in samples
+            torch.as_tensor(t.target, dtype=torch.float32) for t in tree_samples
         ])
-    return samples, targets
+    return tree_samples, targets
 
 
 def build_graph_dataloader(dataset, batch_size=4, num_workers=0, shuffle=True):
