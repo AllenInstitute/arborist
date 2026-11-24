@@ -259,7 +259,6 @@ class ArboristEncoder(nn.Module):
         torch.Tensor
             Shape (B, embed_dim), on this module's device.
         """
-        # Arborist builds fp32 tensors from numpy inside encode
         with torch.amp.autocast("cuda", enabled=False):
             z = []
             for tree_sample in tree_samples:
