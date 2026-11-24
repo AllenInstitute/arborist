@@ -232,14 +232,9 @@ class Arborist(nn.Module):
     @classmethod
     def load(cls, path, map_location=None):
         checkpoint = torch.load(path, map_location=map_location, weights_only=True)
-        model = cls(**upgrade_config(checkpoint["config"]))
+        model = cls(**checkpoint["config"])
         model.load_state_dict(upgrade_state_dict(checkpoint["state_dict"]))
         return model
-
-
-def upgrade_config(config):
-    """Drops the removed pool_cable option from saved constructor kwargs."""
-    return {k: v for k, v in config.items() if k != "pool_cable"}
 
 
 def upgrade_state_dict(state_dict):
