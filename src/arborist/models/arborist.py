@@ -231,9 +231,8 @@ class ArboristEncoder(nn.Module):
     latent_dim : int, optional
         Arborist latent dimension. Default is 64.
     readout : str, optional
-        "cls": the global embedding. "cls+root_curves": the global embedding
-        concatenated with the mean of the root curves' embeddings. Default
-        is "cls+root_curves".
+        "cls" or "cls+root_curves" (CLS plus mean root curve embedding).
+        Default is "cls+root_curves".
     **arborist_kwargs
         Forwarded to Arborist.
     """
