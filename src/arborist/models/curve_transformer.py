@@ -91,7 +91,6 @@ class CurveEncoder(nn.Module):
         diffs : torch.Tensor
             Shape (B, N, 3), raw per-step displacements, with
             diffs[:, 0] == [0, 0, 0].
-            N can vary across calls.
         mask : torch.Tensor, optional
             True where padding (to be ignored). Default is None.
 
