@@ -153,8 +153,6 @@ class SubtreeGraphTransformer(GraphTransformer):
     n_layers : int, optional
         Stage-2 layers, attending between the root and the subtrees.
         Default is 3.
-    n_local_layers : int, optional
-        Stage-1 layers, attending within each subtree. Default is 1.
     d_ff : int, optional
         Feed-forward width. Default is 128.
     dropout : float, optional
@@ -169,7 +167,6 @@ class SubtreeGraphTransformer(GraphTransformer):
         latent_dim,
         n_heads=4,
         n_layers=3,
-        n_local_layers=1,
         d_ff=128,
         dropout=0.1,
         geom_scale=10.0,
@@ -177,10 +174,7 @@ class SubtreeGraphTransformer(GraphTransformer):
         super().__init__(latent_dim, n_heads, n_layers, d_ff, dropout, geom_scale)
         self.n_heads = n_heads
         self.group_cls = nn.Parameter(torch.zeros(latent_dim))
-        self.local_layers = nn.ModuleList([
-            GraphTransformerLayer(latent_dim, n_heads, d_ff, dropout)
-            for _ in range(n_local_layers)
-        ])
+        self.local_layer = GraphTransformerLayer(latent_dim, n_heads, d_ff, dropout)
         self.broadcast = nn.Sequential(
             nn.LayerNorm(latent_dim),
             nn.Linear(latent_dim, latent_dim),
@@ -223,8 +217,7 @@ class SubtreeGraphTransformer(GraphTransformer):
         h = x[tokens]
         h[:, 0] = self.group_cls + pe[heads]
         bias = self._gather_bias(attn_bias, tokens, padding)
-        for layer in self.local_layers:
-            h = layer(h, bias)
+        h = self.local_layer(h, bias)
         groups = h[:, 0]                                       # (G, d)
 
         # Stage 2: the root attends with the subtree class tokens

@@ -72,9 +72,6 @@ class Arborist(nn.Module):
         "flat": attention over all curves at once. "subtree": attention
         within each subtree, then between the subtrees and the root. Default
         is "flat".
-    pool_local_layers : int, optional
-        Subtree pooling only. Attention layers within each subtree;
-        graph_n_layers then counts the layers between subtrees. Default is 1.
     """
 
     def __init__(
@@ -91,7 +88,6 @@ class Arborist(nn.Module):
         dropout=0.1,
         geom_scale=10.0,
         pooling="flat",
-        pool_local_layers=1,
     ):
         super().__init__()
         if pooling not in POOLINGS:
@@ -109,7 +105,6 @@ class Arborist(nn.Module):
             "dropout": dropout,
             "geom_scale": geom_scale,
             "pooling": pooling,
-            "pool_local_layers": pool_local_layers,
         }
         self.curve_encoder = CurveEncoder(
             nodes_per_token=curve_nodes_per_token,
@@ -125,7 +120,6 @@ class Arborist(nn.Module):
                 latent_dim=latent_dim,
                 n_heads=graph_n_heads,
                 n_layers=graph_n_layers,
-                n_local_layers=pool_local_layers,
                 d_ff=graph_d_ff,
                 dropout=dropout,
                 geom_scale=geom_scale,
