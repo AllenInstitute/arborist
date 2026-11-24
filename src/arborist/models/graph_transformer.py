@@ -26,11 +26,11 @@ class GraphTransformer(nn.Module):
     def __init__(
         self,
         latent_dim,
-        n_heads=4,
-        n_layers=3,
         d_ff=128,
         dropout=0.1,
         geom_scale=10.0,
+        n_heads=4,
+        n_layers=3,
     ):
         super().__init__()
         self.global_pe = GlobalPE(latent_dim, geom_scale=geom_scale)
@@ -148,11 +148,6 @@ class SubtreeGraphTransformer(GraphTransformer):
     ----------
     latent_dim : int
         Token dimension.
-    n_heads : int, optional
-        Attention heads in every layer. Default is 4.
-    n_layers : int, optional
-        Stage-2 layers, attending between the root and the subtrees.
-        Default is 3.
     d_ff : int, optional
         Feed-forward width. Default is 128.
     dropout : float, optional
@@ -160,18 +155,23 @@ class SubtreeGraphTransformer(GraphTransformer):
     geom_scale : float, optional
         Reference length (microns) for the positional encodings. Default is
         10.0.
+    n_heads : int, optional
+        Attention heads in every layer. Default is 4.
+    n_layers : int, optional
+        Stage-2 layers, attending between the root and the subtrees.
+        Default is 3.
     """
 
     def __init__(
         self,
         latent_dim,
-        n_heads=4,
-        n_layers=3,
         d_ff=128,
         dropout=0.1,
         geom_scale=10.0,
+        n_heads=4,
+        n_layers=3,
     ):
-        super().__init__(latent_dim, n_heads, n_layers, d_ff, dropout, geom_scale)
+        super().__init__(latent_dim, d_ff, dropout, geom_scale, n_heads, n_layers)
         self.n_heads = n_heads
         self.group_cls = nn.Parameter(torch.zeros(latent_dim))
         self.local_layer = GraphTransformerLayer(latent_dim, n_heads, d_ff, dropout)

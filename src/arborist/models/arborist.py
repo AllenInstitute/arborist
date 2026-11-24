@@ -117,20 +117,20 @@ class Arborist(nn.Module):
         if pooling == "subtree":
             self.graph_transformer = SubtreeGraphTransformer(
                 latent_dim=latent_dim,
-                n_heads=graph_n_heads,
-                n_layers=graph_n_layers,
                 d_ff=graph_d_ff,
                 dropout=dropout,
                 geom_scale=geom_scale,
+                n_heads=graph_n_heads,
+                n_layers=graph_n_layers,
             )
         else:
             self.graph_transformer = GraphTransformer(
                 latent_dim=latent_dim,
-                n_heads=graph_n_heads,
-                n_layers=graph_n_layers,
                 d_ff=graph_d_ff,
                 dropout=dropout,
                 geom_scale=geom_scale,
+                n_heads=graph_n_heads,
+                n_layers=graph_n_layers,
             )
         self.cls_token = nn.Parameter(torch.zeros(latent_dim))
 
