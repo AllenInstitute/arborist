@@ -23,11 +23,9 @@ PTS_PER_STEP = 8
 
 class CurveEncoder(nn.Module):
     """
-    Transformer encoder that maps 3D finite differences to a latent vector.
-    Curves are tokenized into fixed-length segments plus a class token, with
-    each segment encoding flattened raw finite differences (step lengths are
-    kept, not normalized) and normalized arc-length position. Every segment
-    attends to every other segment; only zero-padded segments are masked.
+    Transformer encoder that maps a curve's finite differences to a latent
+    vector. The curve is split into fixed-length segments plus a class
+    token; padded segments are masked.
     """
 
     def __init__(
