@@ -52,6 +52,9 @@ class Arborist(nn.Module):
         Transformer layers in CurveEncoder. Default is 4.
     curve_d_ff : int, optional
         CurveEncoder feed-forward dimension. Default is 128.
+    curve_latent_dim : int, optional
+        CurveEncoder output dimension, also the graph transformer width and
+        the embedding dimension. Default is 64.
     graph_n_heads : int, optional
         Attention heads in GraphTransformer. Default is 4.
     graph_n_layers : int, optional
@@ -65,9 +68,6 @@ class Arborist(nn.Module):
         "flat": attention over all curves at once. "subtree": attention
         within each subtree, then between the subtrees and the root. Default
         is "flat".
-    output_dim : int, optional
-        Embedding dimension, shared by the CurveEncoder output and the
-        graph transformer. Default is 64.
     output_dropout : float, optional
         Dropout probability shared across both sub-models. Default is 0.1.
     """
@@ -79,12 +79,12 @@ class Arborist(nn.Module):
         curve_n_heads=4,
         curve_n_layers=4,
         curve_d_ff=128,
+        curve_latent_dim=64,
         graph_n_heads=4,
         graph_n_layers=3,
         graph_d_ff=128,
         graph_geom_scale=10.0,
         graph_pooling="flat",
-        output_dim=64,
         output_dropout=0.1,
     ):
         super().__init__()
@@ -96,12 +96,12 @@ class Arborist(nn.Module):
             "curve_n_heads": curve_n_heads,
             "curve_n_layers": curve_n_layers,
             "curve_d_ff": curve_d_ff,
+            "curve_latent_dim": curve_latent_dim,
             "graph_n_heads": graph_n_heads,
             "graph_n_layers": graph_n_layers,
             "graph_d_ff": graph_d_ff,
             "graph_geom_scale": graph_geom_scale,
             "graph_pooling": graph_pooling,
-            "output_dim": output_dim,
             "output_dropout": output_dropout,
         }
         self.curve_encoder = CurveEncoder(
@@ -110,12 +110,12 @@ class Arborist(nn.Module):
             n_heads=curve_n_heads,
             n_layers=curve_n_layers,
             d_ff=curve_d_ff,
-            latent_dim=output_dim,
+            latent_dim=curve_latent_dim,
             dropout=output_dropout,
         )
         if graph_pooling == "subtree":
             self.graph_transformer = SubtreeGraphTransformer(
-                latent_dim=output_dim,
+                latent_dim=curve_latent_dim,
                 d_ff=graph_d_ff,
                 dropout=output_dropout,
                 geom_scale=graph_geom_scale,
@@ -124,14 +124,14 @@ class Arborist(nn.Module):
             )
         else:
             self.graph_transformer = GraphTransformer(
-                latent_dim=output_dim,
+                latent_dim=curve_latent_dim,
                 d_ff=graph_d_ff,
                 dropout=output_dropout,
                 geom_scale=graph_geom_scale,
                 n_heads=graph_n_heads,
                 n_layers=graph_n_layers,
             )
-        self.cls_token = nn.Parameter(torch.zeros(output_dim))
+        self.cls_token = nn.Parameter(torch.zeros(curve_latent_dim))
 
     @torch._dynamo.disable
     def encode(self, tree_sample):
@@ -146,16 +146,16 @@ class Arborist(nn.Module):
         Returns
         -------
         z_tree : torch.Tensor
-            Shape (output_dim,) — global tree embedding from the CLS token
+            Shape (curve_latent_dim,) — global tree embedding from the CLS token
             after graph contextualization.
         z_curves : torch.Tensor
-            Shape (n_curves, output_dim) — per-curve embeddings after the
+            Shape (n_curves, curve_latent_dim) — per-curve embeddings after the
             GraphTransformer contextualizes each curve by its neighbors.
         """
         device = next(self.parameters()).device
 
         if not tree_sample.curves:
-            empty = torch.zeros(self.config["output_dim"], device=device)
+            empty = torch.zeros(self.config["curve_latent_dim"], device=device)
             return empty, empty.unsqueeze(0)
 
         # Embed each curve independently via the sequence transformer
@@ -228,8 +228,8 @@ class ArboristEncoder(nn.Module):
 
     Parameters
     ----------
-    output_dim : int, optional
-        Arborist output dimension. Default is 64.
+    curve_latent_dim : int, optional
+        Arborist latent dimension; see Arborist. Default is 64.
     readout : str, optional
         "cls" or "cls+root_curves" (CLS plus mean root curve embedding).
         Default is "cls+root_curves".
@@ -237,14 +237,14 @@ class ArboristEncoder(nn.Module):
         Forwarded to Arborist.
     """
 
-    def __init__(self, output_dim=64, readout="cls+root_curves", **arborist_kwargs):
+    def __init__(self, curve_latent_dim=64, readout="cls+root_curves", **arborist_kwargs):
         super().__init__()
         if readout not in ("cls", "cls+root_curves"):
             raise ValueError(f"Unknown readout: {readout}")
-        self.config = {"output_dim": output_dim, "readout": readout, **arborist_kwargs}
+        self.config = {"curve_latent_dim": curve_latent_dim, "readout": readout, **arborist_kwargs}
         self.readout = readout
-        self.embed_dim = 2 * output_dim if readout == "cls+root_curves" else output_dim
-        self.arborist = Arborist(output_dim=output_dim, **arborist_kwargs)
+        self.embed_dim = 2 * curve_latent_dim if readout == "cls+root_curves" else curve_latent_dim
+        self.arborist = Arborist(curve_latent_dim=curve_latent_dim, **arborist_kwargs)
 
     @torch._dynamo.disable
     def forward(self, tree_samples):
