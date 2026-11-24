@@ -282,8 +282,8 @@ def readout(z_tree, z_curves, sample, kind="cls+root"):
 class ArboristEncoder(nn.Module):
     """
     Arborist as an embedding module: encodes a batch of TreeSamples and
-    applies a readout, giving one vector per sample. Task heads in
-    ``arborist.models.heads`` read the encoding per sample instead.
+    applies a readout, giving one vector per sample, for use as the
+    morphology branch of a downstream model.
 
     Parameters
     ----------
