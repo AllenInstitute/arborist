@@ -4,7 +4,10 @@ Created on Mon Aug 6 17:00:00 2026
 @author: Anna Grim
 @email: anna.grim@alleninstitute.org
 
-End-to-end ArboristModel for neuron morphology encoding.
+End-to-end Arborist model for neuron morphology encoding. ``Arborist``
+encodes one TreeSample into a global and per-curve embeddings; ``readout``
+turns that encoding into a single vector; ``ArboristEncoder`` does both for
+a batch, for use as the morphology branch of a larger model.
 
 """
 
@@ -225,6 +228,99 @@ class Arborist(nn.Module):
 
     def forward(self, sample):
         return self.encode(sample)
+
+    def save(self, path):
+        torch.save(
+            {"config": self.config, "state_dict": self.state_dict()}, path
+        )
+
+    @classmethod
+    def load(cls, path, map_location=None):
+        checkpoint = torch.load(path, map_location=map_location, weights_only=True)
+        model = cls(**checkpoint["config"])
+        model.load_state_dict(checkpoint["state_dict"])
+        return model
+
+
+# Width of each readout as a multiple of latent_dim
+READOUT_WIDTH = {"cls": 1, "cls+root": 2}
+READOUTS = tuple(READOUT_WIDTH)
+
+
+def readout(z_tree, z_curves, sample, kind="cls+root"):
+    """
+    Reads one embedding out of an encoded TreeSample.
+
+    Parameters
+    ----------
+    z_tree : torch.Tensor
+        Shape (latent_dim,). Global tree embedding from ``Arborist.encode``.
+    z_curves : torch.Tensor
+        Shape (n_curves, latent_dim). Per-curve embeddings.
+    sample : TreeSample
+        The encoded sample.
+    kind : str, optional
+        "cls": the global embedding. "cls+root": the global embedding
+        concatenated with the mean embedding of the curves adjacent to the
+        root. The root is the site of interest, so this reads its local
+        geometry directly instead of only through attention into the CLS
+        token. Default is "cls+root".
+
+    Returns
+    -------
+    torch.Tensor
+        Shape (latent_dim * READOUT_WIDTH[kind],).
+    """
+    if kind == "cls":
+        return z_tree
+    if kind == "cls+root":
+        idx = list(sample.root_curve_indices or range(len(z_curves)))
+        return torch.cat([z_tree, z_curves[idx].mean(dim=0)])
+    raise ValueError(f"Unknown readout: {kind}")
+
+
+class ArboristEncoder(nn.Module):
+    """
+    Arborist as an embedding module: encodes a batch of TreeSamples and
+    applies a readout, giving one vector per sample. Task heads in
+    ``arborist.models.heads`` read the encoding per sample instead.
+
+    Parameters
+    ----------
+    latent_dim : int, optional
+        Arborist latent dimension. Default is 64.
+    readout : str, optional
+        One of READOUTS. Default is "cls+root".
+    **arborist_kwargs
+        Forwarded to Arborist.
+    """
+
+    def __init__(self, latent_dim=64, readout="cls+root", **arborist_kwargs):
+        super().__init__()
+        if readout not in READOUTS:
+            raise ValueError(f"Unknown readout: {readout}")
+        self.config = {"latent_dim": latent_dim, "readout": readout, **arborist_kwargs}
+        self.readout = readout
+        self.embed_dim = latent_dim * READOUT_WIDTH[readout]
+        self.arborist = Arborist(latent_dim=latent_dim, **arborist_kwargs)
+
+    @torch._dynamo.disable
+    def forward(self, samples):
+        """
+        Parameters
+        ----------
+        samples : List[TreeSample]
+            Batch of samples, as returned by collate_trees.
+
+        Returns
+        -------
+        torch.Tensor
+            Shape (B, embed_dim), on this module's device.
+        """
+        # Arborist builds fp32 tensors from numpy inside encode
+        with torch.amp.autocast("cuda", enabled=False):
+            z = [readout(*self.arborist.encode(s), s, self.readout) for s in samples]
+        return torch.stack(z)
 
     def save(self, path):
         torch.save(
