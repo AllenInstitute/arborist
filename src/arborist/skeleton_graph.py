@@ -9,9 +9,7 @@ that represents a tree-structured graph with 3D spatial geometry.
 
 """
 
-from collections import defaultdict
 from concurrent.futures import as_completed, ThreadPoolExecutor
-from io import StringIO
 from scipy.spatial import KDTree
 from tqdm import tqdm
 
@@ -109,7 +107,7 @@ class SkeletonGraph(rx.PyGraph):
         self.node_xyz = np.zeros((num_nodes, 3), dtype=np.float32)
         self.node_feats = {
             "radius": np.zeros((num_nodes,), dtype=np.float16),
-            "type": np.zeros((num_nodes,), dtype=np.uint8),
+            "type": np.zeros((num_nodes,), dtype=np.int8),
         }
 
         # Add connected components to graph
@@ -183,11 +181,13 @@ class SkeletonGraph(rx.PyGraph):
         component_id : int
             Connected component ID.
         """
+        # Initializations
         i, j = edge_id
         dist_i = math.dist(self.node_xyz[i], attrs["xyz"][0])
         dist_j = math.dist(self.node_xyz[j], attrs["xyz"][0])
         start, end = (i, j) if dist_i < dist_j else (j, i)
 
+        # Populate edges
         prev_id = start
         for k, xyz in enumerate(attrs["xyz"][1:-1], start=1):
             new_id = self.add_node(None)
@@ -215,6 +215,7 @@ class SkeletonGraph(rx.PyGraph):
         """
         Reassigns component IDs for all connected components in the graph.
         """
+        # Reassign IDs
         component_id_to_swc_id = dict()
         for i, nodes in enumerate(rx.connected_components(self), start=1):
             nodes = np.array(list(nodes), dtype=int)
@@ -222,8 +223,7 @@ class SkeletonGraph(rx.PyGraph):
             self.node_component_id[nodes] = i
         self.component_id_to_swc_id = component_id_to_swc_id
 
-        # Deduplicate after IDs are rebuilt: components created by a split
-        # share a swc_id but now have distinct component IDs.
+        # Deduplicate after IDs are rebuilt
         self.check_swc_ids()
 
     def relabel_nodes(self):
@@ -270,9 +270,19 @@ class SkeletonGraph(rx.PyGraph):
             self.relabel_nodes()
 
     def remove_small_components(self, min_size=20, relabel_nodes=True):
+        """
+        Removes connected components with fewer than 20 nodes.
+
+        Parameters
+        ----------
+        min_size : int, optional
+            Minimal number of nodes in connected components that are kept.
+        relabel_nodes : bool, optional
+            True if nodes should be relabeled afer removing small components.
+        """
         rm_nodes = list()
-        for nodes in map(list, rx.connected_components(self)):
-            length = self.cable_length(max_depth=min_size, root=nodes[0])
+        components, lengths = self.component_cable_lengths()
+        for nodes, length in zip(components, lengths):
             if length < min_size:
                 rm_nodes.extend(nodes)
         self.remove_nodes_from(rm_nodes)
@@ -387,35 +397,55 @@ class SkeletonGraph(rx.PyGraph):
         it survives a load/write round-trip. Graphs built without that feature
         fall back to 2 (axon), which is what this writer always emitted before.
         """
-        def write_entry(node, parent):
-            x, y, z = self.node_xyz[node]
-            r = self.node_feats["radius"][node] if use_radius else 2
-            t = (
-                self.node_feats["type"][node]
-                if "type" in self.node_feats else 2
-            )
-            node_to_idx[node] = cnt
-            text_buffer.write(
-                f"\n{cnt} {t} {x} {y} {z} {r} {node_to_idx[parent]}"
-            )
+        # Step 1: DFS over the component
+        nodes = [root]
+        parents = [-1]
+        swc_ids = {root: 1}
+        stack = [root]
+        while stack:
+            i = stack.pop()
+            for j in self.neighbors(i):
+                if j not in swc_ids:
+                    swc_ids[j] = len(nodes) + 1
+                    nodes.append(j)
+                    parents.append(swc_ids[i])
+                    stack.append(j)
+        n = len(nodes)
+        nodes = np.asarray(nodes, dtype=np.int64)
+        parents = np.asarray(parents, dtype=np.int64)
 
-        with StringIO() as text_buffer:
-            text_buffer.write("# id, type, z, y, x, r, pid")
-            cnt = 1
-            node_to_idx = defaultdict(lambda: -1)
-            write_entry(root, -1)
-            for i, j in rx.dfs_edges(self, source=root):
-                cnt += 1
-                write_entry(j, i)
+        # Step 2: gather column data with vectorized indexing
+        xyz = np.round(self.node_xyz[nodes].astype(np.float64), 4).tolist()
+        if use_radius:
+            radius = self.node_feats["radius"][nodes].astype(np.float64)
+            radius = radius.tolist()
+        else:
+            radius = [2] * n
+        if "type" in self.node_feats:
+            types = self.node_feats["type"][nodes].tolist()
+        else:
+            types = [2] * n
 
-            # Deduplicate filename within zip
-            swc_id = self.node_swc_id(root)
-            name = f"{swc_id}.swc"
-            suffix = 0
-            while name in zipfile.namelist():
-                name = f"{swc_id}.{suffix}.swc"
-                suffix += 1
-            zipfile.writestr(name, text_buffer.getvalue())
+        lines = [
+            f"{i} {t} {x} {y} {z} {r} {p}"
+            for i, t, (x, y, z), r, p in zip(
+                range(1, n + 1), types, xyz, radius, parents.tolist()
+            )
+        ]
+        text = "# id, type, z, y, x, r, pid\n" + "\n".join(lines)
+
+        # Deduplicate filename within zip
+        swc_id = self.node_swc_id(root)
+        name = f"{swc_id}.swc"
+        suffix = 0
+        while True:
+            try:
+                zipfile.getinfo(name)
+            except KeyError:
+                break
+            name = f"{swc_id}.{suffix}.swc"
+            suffix += 1
+        zipfile.writestr(name, text)
 
     # --- Helpers ---
     def branching_nodes(self):
@@ -423,6 +453,19 @@ class SkeletonGraph(rx.PyGraph):
         Returns all branching nodes.
         """
         return [i for i in self.node_indices() if self.degree(i) > 2]
+
+    def node_cable_lengths(self):
+        """
+        Returns a dict mapping each node ID to the cable length of its
+        connected component, computed once per component rather than per leaf.
+        """
+        result = {}
+        for component in rx.connected_components(self):
+            root = next(iter(component))
+            length = self.cable_length(root=root)
+            for node in component:
+                result[node] = length
+        return result
 
     def cable_length(self, max_depth=np.inf, root=None):
         """
@@ -446,6 +489,67 @@ class SkeletonGraph(rx.PyGraph):
             if cable_length > max_depth:
                 break
         return cable_length
+
+    def edge_lengths(self):
+        """
+        Computes the Euclidean length of every edge at once.
+
+        Returns
+        -------
+        edges : numpy.ndarray
+            Edge endpoints, of shape (num_edges, 2).
+        lengths : numpy.ndarray
+            Length of each edge, of shape (num_edges,).
+        """
+        edges = np.asarray(self.edge_list(), dtype=np.int64)
+        if len(edges) == 0:
+            return edges.reshape(0, 2), np.zeros(0)
+        diffs = self.node_xyz[edges[:, 0]] - self.node_xyz[edges[:, 1]]
+        return edges, np.linalg.norm(diffs.astype(np.float64), axis=1)
+
+    def component_cable_lengths(self):
+        """
+        Computes the cable length of every connected component in one
+        vectorized pass, instead of a Python DFS per component. Works on the
+        current node indices, so it does not require a relabel after node
+        removal.
+
+        Returns
+        -------
+        components : List[Set[int]]
+            Connected components, as returned by rx.connected_components.
+        lengths : numpy.ndarray
+            Cable length of each component, aligned with "components".
+        """
+        components = rx.connected_components(self)
+        if len(components) == 0:
+            return components, np.zeros(0)
+
+        labels = np.empty(max(self.node_indices()) + 1, dtype=np.int64)
+        for k, nodes in enumerate(components):
+            labels[list(nodes)] = k
+
+        edges, lengths = self.edge_lengths()
+        weights = lengths if len(edges) else None
+        idxs = labels[edges[:, 0]] if len(edges) else np.zeros(0, np.int64)
+        totals = np.bincount(idxs, weights=weights, minlength=len(components))
+        return components, totals
+
+    def node_cable_lengths(self):
+        """
+        Gets, for every node, the cable length of the component containing
+        it.
+
+        Returns
+        -------
+        numpy.ndarray
+            Array indexed by node ID.
+        """
+        components, lengths = self.component_cable_lengths()
+        result = np.zeros(max(self.node_indices(), default=-1) + 1)
+        for nodes, length in zip(components, lengths):
+            result[list(nodes)] = length
+        return result
 
     def clip_to_skeleton(self, gt_graph, dist):
         """
@@ -632,16 +736,29 @@ class SkeletonGraph(rx.PyGraph):
         """
         Gets nodes connected to root up to max_dist microns.
         """
-        queue = [(root, 0)]
-        visited = {root}
+        return list(self.path_distances_within(root, max_dist).keys())
+
+    def path_distances_within(self, root, max_dist):
+        """
+        Computes the along-skeleton distance from root to every node within
+        max_dist microns of it. The traversal never leaves the neighborhood,
+        unlike a shortest-path query over the whole component.
+
+        Returns
+        -------
+        Dict[int, float]
+            Maps each reachable node to its path distance from root.
+        """
+        dists = {root: 0.0}
+        queue = [(root, 0.0)]
         while queue:
             i, dist_i = queue.pop()
             for j in self.neighbors(i):
                 dist_j = dist_i + self.dist(i, j)
-                if dist_j < max_dist and j not in visited:
+                if dist_j < max_dist and j not in dists:
+                    dists[j] = dist_j
                     queue.append((j, dist_j))
-                    visited.add(j)
-        return list(visited)
+        return dists
 
     def path_from_leaf(self, leaf, max_depth=np.inf):
         """
