@@ -136,13 +136,9 @@ def partition_curves(parents):
 
 class SubtreeGraphTransformer(GraphTransformer):
     """
-    GraphTransformer with a subtree level between the curves and the root.
-    Curves are partitioned into connected subtrees (``partition_curves``).
-    Stage 1 attends within each subtree under its own class token; stage 2,
-    the inherited layer stack, attends between the root and the subtree
-    tokens; subtree context is then broadcast back to the curves so the
-    per-curve embeddings keep a view of the whole tree. Same inputs and
-    outputs as GraphTransformer, plus the grouping.
+    GraphTransformer that attends within each subtree under its own class
+    token, then between the subtree tokens and the root, and broadcasts the
+    result back to the curves.
 
     Each subtree's class token takes the position of its head curve, so the
     positional encodings describe the subtree's placement and its distances
