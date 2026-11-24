@@ -5,9 +5,8 @@ Created on Mon Aug 6 17:00:00 2026
 @email: anna.grim@alleninstitute.org
 
 End-to-end Arborist model for neuron morphology encoding. ``Arborist``
-encodes one TreeSample into a global and per-curve embeddings; ``readout``
-turns that encoding into a single vector; ``ArboristEncoder`` does both for
-a batch, for use as the morphology branch of a larger model.
+encodes one TreeSample into a global and per-curve embeddings;
+``ArboristEncoder`` encodes a batch and reads out one vector per sample.
 
 """
 
@@ -40,7 +39,7 @@ class Arborist(nn.Module):
                         within connected subtrees, then between the subtrees
                         and the root.
       3. Readout — CLS token output → global tree z, per-curve outputs →
-                   z_curves; see ``readout``.
+                   z_curves.
 
     Parameters
     ----------
@@ -231,64 +230,31 @@ class Arborist(nn.Module):
         return model
 
 
-# Width of each readout as a multiple of latent_dim
-READOUT_WIDTH = {"cls": 1, "cls+root_curves": 2}
-READOUTS = tuple(READOUT_WIDTH)
-
-
-def readout(z_tree, z_curves, sample, kind="cls+root_curves"):
-    """
-    Reads one embedding out of an encoded TreeSample.
-
-    Parameters
-    ----------
-    z_tree : torch.Tensor
-        Shape (latent_dim,). Global tree embedding from ``Arborist.encode``.
-    z_curves : torch.Tensor
-        Shape (n_curves, latent_dim). Per-curve embeddings.
-    sample : TreeSample
-        The encoded sample.
-    kind : str, optional
-        "cls": the global embedding. "cls+root_curves": the global embedding
-        concatenated with the mean of the root curves' embeddings. Default
-        is "cls+root_curves".
-
-    Returns
-    -------
-    torch.Tensor
-        Shape (latent_dim * READOUT_WIDTH[kind],).
-    """
-    if kind == "cls":
-        return z_tree
-    if kind == "cls+root_curves":
-        idx = list(sample.root_curve_indices or range(len(z_curves)))
-        return torch.cat([z_tree, z_curves[idx].mean(dim=0)])
-    raise ValueError(f"Unknown readout: {kind}")
-
-
 class ArboristEncoder(nn.Module):
     """
     Arborist as an embedding module: encodes a batch of TreeSamples and
-    applies a readout, giving one vector per sample, for use as the
-    morphology branch of a downstream model.
+    reads out one vector per sample, for use as the morphology branch of a
+    downstream model.
 
     Parameters
     ----------
     latent_dim : int, optional
         Arborist latent dimension. Default is 64.
     readout : str, optional
-        One of READOUTS. Default is "cls+root_curves".
+        "cls": the global embedding. "cls+root_curves": the global embedding
+        concatenated with the mean of the root curves' embeddings. Default
+        is "cls+root_curves".
     **arborist_kwargs
         Forwarded to Arborist.
     """
 
     def __init__(self, latent_dim=64, readout="cls+root_curves", **arborist_kwargs):
         super().__init__()
-        if readout not in READOUTS:
+        if readout not in ("cls", "cls+root_curves"):
             raise ValueError(f"Unknown readout: {readout}")
         self.config = {"latent_dim": latent_dim, "readout": readout, **arborist_kwargs}
         self.readout = readout
-        self.embed_dim = latent_dim * READOUT_WIDTH[readout]
+        self.embed_dim = 2 * latent_dim if readout == "cls+root_curves" else latent_dim
         self.arborist = Arborist(latent_dim=latent_dim, **arborist_kwargs)
 
     @torch._dynamo.disable
@@ -306,7 +272,13 @@ class ArboristEncoder(nn.Module):
         """
         # Arborist builds fp32 tensors from numpy inside encode
         with torch.amp.autocast("cuda", enabled=False):
-            z = [readout(*self.arborist.encode(s), s, self.readout) for s in samples]
+            z = []
+            for s in samples:
+                z_tree, z_curves = self.arborist.encode(s)
+                if self.readout == "cls+root_curves":
+                    idx = list(s.root_curve_indices or range(len(z_curves)))
+                    z_tree = torch.cat([z_tree, z_curves[idx].mean(dim=0)])
+                z.append(z_tree)
         return torch.stack(z)
 
     def save(self, path):
