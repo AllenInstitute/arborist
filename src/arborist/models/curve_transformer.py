@@ -25,8 +25,9 @@ class CurveEncoder(nn.Module):
     """
     Transformer encoder that maps 3D finite differences to a latent vector.
     Curves are tokenized into fixed-length segments plus a class token, with
-    each segment encoding flattened finite differences and normalized arc-
-    length position.
+    each segment encoding flattened raw finite differences (step lengths are
+    kept, not normalized) and normalized arc-length position. Every segment
+    attends to every other segment; only zero-padded segments are masked.
     """
 
     def __init__(
@@ -88,8 +89,9 @@ class CurveEncoder(nn.Module):
         Parameters
         ----------
         diffs : torch.Tensor
-            Shape (B, N, 3), normalized to the unit sphere, with
-            diffs[:, 0] == [0, 0, 0]. N can vary across calls.
+            Shape (B, N, 3), raw per-step displacements (same units as the
+            node coordinates, not normalized), with diffs[:, 0] == [0, 0, 0].
+            N can vary across calls.
         mask : torch.Tensor, optional
             True where padding (to be ignored). Default is None.
 
@@ -103,12 +105,12 @@ class CurveEncoder(nn.Module):
         B, N, _ = diffs.shape
 
         # Zero-pad to a whole number of segments
-        pad = (-N) % self.segment_len
+        pad = (-N) % self.nodes_per_token
         if pad:
             diffs = F.pad(diffs, (0, 0, 0, pad))
             if mask is not None:
                 mask = F.pad(mask, (0, pad), value=True)
-        n_segments = (N + pad) // self.segment_len
+        n_segments = (N + pad) // self.nodes_per_token
 
         # Arc length: cumulative step norm, normalized to [0, 1] per sequence.
         step_len = diffs.norm(dim=-1)

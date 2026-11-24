@@ -4,13 +4,9 @@ Created on Mon Aug 6 17:00:00 2026
 @author: Anna Grim
 @email: anna.grim@alleninstitute.org
 
-Transformers for contextualizing curve embeddings over skeleton topology.
-Each token is one curve (plus the root as token 0); tree structure enters
-through the positional encodings in arborist.models.positional_encoding: a
-global PE added to the tokens and a relative PE added to the attention
-logits. GraphTransformer attends over all tokens at once;
-SubtreeGraphTransformer adds a level in between, attending within connected
-subtrees of curves and then between the subtrees and the root.
+Transformers over curve embeddings, one token per curve plus the root.
+GraphTransformer attends over all tokens; SubtreeGraphTransformer attends
+within each subtree, then between the subtrees and the root.
 
 """
 

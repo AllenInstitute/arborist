@@ -256,10 +256,8 @@ def readout(z_tree, z_curves, sample, kind="cls+root_curves"):
         The encoded sample.
     kind : str, optional
         "cls": the global embedding. "cls+root_curves": the global embedding
-        concatenated with the mean embedding of the curves adjacent to the
-        root. The root is the site of interest, so this reads its local
-        geometry directly instead of only through attention into the CLS
-        token. Default is "cls+root_curves".
+        concatenated with the mean of the root curves' embeddings. Default
+        is "cls+root_curves".
 
     Returns
     -------
