@@ -69,11 +69,9 @@ class Arborist(nn.Module):
         Reference length r0 (microns) for log compression in the positional
         encoding; see GlobalPE. Default is 10.0.
     pooling : str, optional
-        Attention pattern of the graph transformer. "flat": one attention
-        stack over all curves (GraphTransformer). "subtree": attention
-        within connected subtrees of curves, each read out by its own class
-        token, then between the root and the subtree tokens
-        (SubtreeGraphTransformer). Default is "flat".
+        "flat": attention over all curves at once. "subtree": attention
+        within each subtree, then between the subtrees and the root. Default
+        is "flat".
     pool_local_layers : int, optional
         Subtree pooling only. Attention layers within each subtree;
         graph_n_layers then counts the layers between subtrees. Default is 1.
