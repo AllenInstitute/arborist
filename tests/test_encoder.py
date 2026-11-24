@@ -35,8 +35,8 @@ class ReadoutTest(unittest.TestCase):
             readout(self.z_tree, self.z_curves, self.sample, "cls"), self.z_tree
         )
 
-    def test_cls_root_concatenates_root_curve_mean(self):
-        z = readout(self.z_tree, self.z_curves, self.sample, "cls+root")
+    def test_cls_root_curves_concatenates_root_curve_mean(self):
+        z = readout(self.z_tree, self.z_curves, self.sample, "cls+root_curves")
         self.assertEqual(z.shape, (2 * LATENT,))
         torch.testing.assert_close(z[:LATENT], self.z_tree)
         root_mean = self.z_curves[list(self.sample.root_curve_indices)].mean(dim=0)

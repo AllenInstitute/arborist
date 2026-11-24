@@ -243,11 +243,11 @@ class Arborist(nn.Module):
 
 
 # Width of each readout as a multiple of latent_dim
-READOUT_WIDTH = {"cls": 1, "cls+root": 2}
+READOUT_WIDTH = {"cls": 1, "cls+root_curves": 2}
 READOUTS = tuple(READOUT_WIDTH)
 
 
-def readout(z_tree, z_curves, sample, kind="cls+root"):
+def readout(z_tree, z_curves, sample, kind="cls+root_curves"):
     """
     Reads one embedding out of an encoded TreeSample.
 
@@ -260,11 +260,11 @@ def readout(z_tree, z_curves, sample, kind="cls+root"):
     sample : TreeSample
         The encoded sample.
     kind : str, optional
-        "cls": the global embedding. "cls+root": the global embedding
+        "cls": the global embedding. "cls+root_curves": the global embedding
         concatenated with the mean embedding of the curves adjacent to the
         root. The root is the site of interest, so this reads its local
         geometry directly instead of only through attention into the CLS
-        token. Default is "cls+root".
+        token. Default is "cls+root_curves".
 
     Returns
     -------
@@ -273,7 +273,7 @@ def readout(z_tree, z_curves, sample, kind="cls+root"):
     """
     if kind == "cls":
         return z_tree
-    if kind == "cls+root":
+    if kind == "cls+root_curves":
         idx = list(sample.root_curve_indices or range(len(z_curves)))
         return torch.cat([z_tree, z_curves[idx].mean(dim=0)])
     raise ValueError(f"Unknown readout: {kind}")
@@ -290,12 +290,12 @@ class ArboristEncoder(nn.Module):
     latent_dim : int, optional
         Arborist latent dimension. Default is 64.
     readout : str, optional
-        One of READOUTS. Default is "cls+root".
+        One of READOUTS. Default is "cls+root_curves".
     **arborist_kwargs
         Forwarded to Arborist.
     """
 
-    def __init__(self, latent_dim=64, readout="cls+root", **arborist_kwargs):
+    def __init__(self, latent_dim=64, readout="cls+root_curves", **arborist_kwargs):
         super().__init__()
         if readout not in READOUTS:
             raise ValueError(f"Unknown readout: {readout}")
