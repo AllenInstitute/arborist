@@ -140,10 +140,6 @@ class SubtreeGraphTransformer(GraphTransformer):
     token, then between the subtree tokens and the root, and broadcasts the
     result back to the curves.
 
-    Each subtree's class token takes the position of its head curve, so the
-    positional encodings describe the subtree's placement and its distances
-    to the root and to the other subtrees.
-
     Parameters
     ----------
     latent_dim : int
